@@ -1,0 +1,3 @@
+# Inca package requirements
+# Handlers may use renglo (load_config, DataController, AgentUtilities, SchdController).
+# Install renglo locally if needed: pip install -e ../../dev/renglo-lib

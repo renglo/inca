@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inca"
+version = "1.0.0"
+description = "Inca travel/trip intent handlers (Runner, Reducer, Applier, Patcher, Tools)"
+authors = [
+    {name = "EXHQ Team"}
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[tool.setuptools]
+packages = ["inca", "inca.handlers", "inca.handlers.common"]
+
+[tool.setuptools.package-data]
+inca = ["handlers/*.md"]
