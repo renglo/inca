@@ -46,7 +46,7 @@ class DataControllerTripStore(TripIntentStore):
     Ring is 'noma_travels'. portfolio and org are fixed per store instance.
     """
 
-    RING = "x_travel"
+    RING = "inca_intents"
 
     def __init__(self, dac: Any, portfolio: str, org: str) -> None:
         self._dac = dac

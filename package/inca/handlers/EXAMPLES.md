@@ -24,20 +24,33 @@ You start with a mostly-empty TripIntent (only the message is set):
     "locale": "en-US",
     "timezone": "America/New_York"
   },
-  "party": { "travelers": { "adults": 0, "children": 0, "infants": 0 }, "traveler_profile_ids": [] },
-  "itinerary": { "trip_type": null, "segments": [], "lodging": { "needed": true, "stays": [] }, "ground": { "needed": false } },
-  "preferences": { "flight": {}, "hotel": {} },
-  "constraints": { "budget_total": null, "currency": "USD" },
+  "party": {
+      "travelers": { "adults": 0, "children": 0, "infants": 0 }, 
+      "traveler_profile_ids": [] 
+  },
+  "itinerary": { 
+      "trip_type": null, 
+      "segments": [], 
+      "lodging": { "needed": true, "stays": [] }, 
+      "ground": { "needed": false } 
+  },
+  "preferences": { 
+      "flight": {}, "hotel": {} 
+  },
+  "constraints": { 
+      "budget_total": null, 
+      "currency": "USD" 
+  },
   "working_memory": {
-    "flight_quotes": [],
-    "hotel_quotes": [],
-    "flight_quotes_by_segment": [],
-    "hotel_quotes_by_stay": [],
-    "ranked_bundles": [],
-    "risk_report": null,
-    "selected": { "bundle_id": null, "flight_option_id": null, "hotel_option_id": null, "flight_option_ids": [], "hotel_option_ids": [] },
-    "holds": [],
-    "bookings": []
+      "flight_quotes": [],
+      "hotel_quotes": [],
+      "flight_quotes_by_segment": [],
+      "hotel_quotes_by_stay": [],
+      "ranked_bundles": [],
+      "risk_report": null,
+      "selected": { "bundle_id": null, "flight_option_id": null, "hotel_option_id": null, "flight_option_ids": [], "hotel_option_ids": [] },
+      "holds": [],
+      "bookings": []
   }
 }
 ```
