@@ -1,5 +1,60 @@
 # EXAMPLES
 
+## Party structure (travelers, guests, contact)
+
+**party** holds who is on the trip:
+
+- **party.travelers** — Aggregate counts used for quoting and validation: `{ "adults": N, "children": N, "infants": N }`.
+- **party.traveler_profile_ids** — List of external profile IDs (e.g. from your org's traveler registry). Used when placing holds/bookings so each item can be tied to a profile.
+- **party.guests** — Array of passenger/guest objects for this trip. Each entry can include:
+  - **id** (optional): guest-scoped id (e.g. uuid or stable index).
+  - **traveler_profile_id** (optional): reference to external profile; should match an id in `party.traveler_profile_ids` when present.
+  - **name** (optional): display or full name.
+  - **date_of_birth** (optional): `YYYY-MM-DD`.
+  - **passenger_type**: `"adult"` | `"child"` | `"infant"`.
+  - **preferences** (optional): e.g. `{ "seat": "aisle", "meal": "vegetarian", "special_assistance": [] }`.
+- **party.contact** — Primary contact for the booking: `{ "email": null, "phone": null }` (can be set from a guest or separately).
+
+When **party.guests** is populated, **party.travelers** should stay in sync (e.g. counts derived from guests). Handlers that need per-passenger details (DOB, preferences) use **party.guests**; quote/validation logic uses **party.travelers** and **party.traveler_profile_ids** as today.
+
+Example **party.guests** (passenger IDs, DOB, preferences):
+
+```json
+"party": {
+  "travelers": { "adults": 2, "children": 1, "infants": 0 },
+  "traveler_profile_ids": ["profile_abc", "profile_def", "profile_child"],
+  "guests": [
+    {
+      "id": "guest_1",
+      "traveler_profile_id": "profile_abc",
+      "name": "Jane Doe",
+      "date_of_birth": "1990-05-15",
+      "passenger_type": "adult",
+      "preferences": { "seat": "aisle", "meal": "vegetarian", "special_assistance": [] }
+    },
+    {
+      "id": "guest_2",
+      "traveler_profile_id": "profile_def",
+      "name": "John Doe",
+      "date_of_birth": "1988-11-20",
+      "passenger_type": "adult",
+      "preferences": { "seat": "window", "meal": null, "special_assistance": [] }
+    },
+    {
+      "id": "guest_3",
+      "traveler_profile_id": "profile_child",
+      "name": "Alex Doe",
+      "date_of_birth": "2018-03-10",
+      "passenger_type": "child",
+      "preferences": {}
+    }
+  ],
+  "contact": { "email": "jane@example.com", "phone": null }
+}
+```
+
+---
+
 ## Baseline TripIntent (before tools)
 
 User says:
@@ -25,8 +80,10 @@ You start with a mostly-empty TripIntent (only the message is set):
     "timezone": "America/New_York"
   },
   "party": {
-      "travelers": { "adults": 0, "children": 0, "infants": 0 }, 
-      "traveler_profile_ids": [] 
+      "travelers": { "adults": 0, "children": 0, "infants": 0 },
+      "traveler_profile_ids": [],
+      "guests": [],
+      "contact": { "email": null, "phone": null }
   },
   "itinerary": { 
       "trip_type": null, 

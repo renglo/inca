@@ -124,6 +124,21 @@
     "source": "",
     "type": "object",
     "widget": "text"
+   },
+   {
+    "cardinality": "single",
+    "default": "",
+    "hint": "",
+    "label": "Title",
+    "layer": "0",
+    "multilingual": false,
+    "name": "title",
+    "order": "8",
+    "required": true,
+    "semantic": "isd:title",
+    "source": "",
+    "type": "string",
+    "widget": "text"
    }
   ],
   "handle": "irma",

@@ -1,6 +1,7 @@
 # travel_v1/reducer.py
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 from .common.types import Event, Handler, ReduceTripPayload, ReduceTripResult, ReducerHandlerReturn, ToolCall
@@ -67,10 +68,42 @@ class Reducer(Handler):
             "location_code": dest_code,
             "check_in": lodging.get("check_in"),
             "check_out": lodging.get("check_out"),
-            "rooms": lodging.get("rooms", 1),
-            "guests_per_room": lodging.get("guests_per_room", 2),
             "location_hint": lodging.get("location_hint"),
         }]
+
+    @staticmethod
+    def _flatten_hotel_rooms(by_stay: List[Any]) -> List[List[Dict[str, Any]]]:
+        """Flatten per-stay hotel quotes so each room is one segment (for ranker and selected lookup)."""
+        out: List[List[Dict[str, Any]]] = []
+        for stay in by_stay or []:
+            if not stay:
+                continue
+            # stay is list of options (single room) or list of option lists (multi-room)
+            if isinstance(stay[0], dict):
+                out.append(list(stay))
+            else:
+                out.extend(list(room_list) for room_list in stay)
+        return out
+
+    @staticmethod
+    def _room_occupancies_from_travelers(trip_intent: Dict[str, Any]) -> List[int]:
+        """Compute guest count per room from party.travelers (adults + children, max 4 per room). Same logic as hotel_quote_search."""
+        travelers = (trip_intent.get("party") or {}).get("travelers") or {}
+        adults = max(0, int(travelers.get("adults") or 0))
+        children = max(0, int(travelers.get("children") or 0))
+        total = adults + children
+        if total <= 0:
+            return [1]
+        max_per_room = 4
+        if total <= max_per_room:
+            return [total]
+        occupancies: List[int] = []
+        remaining = total
+        while remaining > 0:
+            take = min(max_per_room, remaining)
+            occupancies.append(take)
+            remaining -= take
+        return occupancies
 
     # -------------------------------------------------------------------------
     # Required fields logic
@@ -167,10 +200,71 @@ class Reducer(Handler):
                 qs.append("What are the hotel check-in and check-out dates?")
             elif "stays[" in p and "location_code" in p:
                 qs.append("Which city/location for this hotel stay?")
+            elif p == "itinerary.segments":
+                qs.append("What airport/city are you departing from and going to, and what's the departure date?")
             else:
                 qs.append(f"I’m missing: {p}. What should it be?")
 
         return "\n".join(f"- {q}" for q in qs)
+
+    def _format_trip_summary(self, trip_intent: Dict[str, Any]) -> str:
+        """Build a short, readable summary of the trip for the user to confirm before quoting."""
+        lines: List[str] = ["I have everything I need. Here’s your trip summary:"]
+        iti = trip_intent.get("itinerary", {}) or {}
+        segs = iti.get("segments", []) or []
+        party = (trip_intent.get("party", {}) or {}).get("travelers", {}) or {}
+        adults = party.get("adults", 0) or 0
+        children = party.get("children", 0) or 0
+        infants = party.get("infants", 0) or 0
+        travelers = []
+        if adults:
+            travelers.append(f"{adults} adult{'s' if adults != 1 else ''}")
+        if children:
+            travelers.append(f"{children} child/ren")
+        if infants:
+            travelers.append(f"{infants} infant{'s' if infants != 1 else ''}")
+        if travelers:
+            lines.append(f"- **Travelers:** {', '.join(travelers)}")
+        if segs:
+            lines.append("- **Flights:**")
+            for i, s in enumerate(segs):
+                orig = (s.get("origin") or {}).get("code") or "?"
+                dest = (s.get("destination") or {}).get("code") or "?"
+                date = s.get("depart_date") or "?"
+                lines.append(f"  - Leg {i + 1}: {orig} → {dest} on {date}")
+        lodging = iti.get("lodging", {}) or {}
+        if lodging.get("needed", True):
+            stays = self._get_effective_stays(trip_intent)
+            if stays:
+                lines.append("- **Hotel stays:**")
+                for j, st in enumerate(stays):
+                    loc = st.get("location_code") or st.get("destination") or "?"
+                    ci = st.get("check_in") or "?"
+                    co = st.get("check_out") or "?"
+                    lines.append(f"  - Stay {j + 1}: {loc}, check-in {ci}, check-out {co}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _is_confirmation(text: str) -> bool:
+        """True if the user message looks like a confirmation to proceed with quoting."""
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        confirmations = (
+            "yes", "y", "ok", "okay", "looks good", "look good", "go ahead", "correct",
+            "that's right", "thats right", "confirm", "proceed", "search", "find flights",
+            "find hotels", "get quotes", "sounds good", "perfect", "good", "continue",
+        )
+        if t in confirmations:
+            return True
+        if len(t) <= 4 and t in ("yes", "y", "ok"):
+            return True
+        if any(t.startswith(c) for c in ("yes ", "yes,", "ok ", "ok,", "sure ", "go ahead")):
+            return True
+        # Short replies that clearly contain confirmation intent (e.g. "yes, go ahead")
+        if len(t) < 50 and ("go ahead" in t or "looks good" in t or "sounds good" in t or "let's go" in t):
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Tool input builders
@@ -234,26 +328,28 @@ class Reducer(Handler):
         return args
 
     def _build_hotel_quote_args(self, trip_intent: Dict[str, Any], stay_index: int = 0, stay: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        iti = trip_intent["itinerary"]
-        lodging = iti["lodging"]
+        iti = trip_intent.get("itinerary") or {}
+        lodging = iti.get("lodging") or {}
         if stay is None:
             stays = self._get_effective_stays(trip_intent)
             stay = stays[stay_index] if stay_index < len(stays) else {}
         hp = (trip_intent.get("preferences", {}) or {}).get("hotel", {}) or {}
         dest = stay.get("location_code") or stay.get("destination") or (lodging.get("location_hint") if not lodging.get("stays") else None)
-        return {
+        args: Dict[str, Any] = {
+            "schema": "renglo.trip_intent.v1",
+            "itinerary": iti,
+            "party": trip_intent.get("party") or {},
+            "stay_index": stay_index,
             "destination": dest,
             "dates": {"start_date": stay.get("check_in"), "end_date": stay.get("check_out")},
-            "rooms": stay.get("rooms", lodging.get("rooms", 1)),
-            "guests_per_room": stay.get("guests_per_room", lodging.get("guests_per_room", 2)),
             "constraints": {
                 "hotel_star_min": hp.get("star_min", 3),
                 "refundable_only": hp.get("refundable_only", False),
                 "location_hint": stay.get("location_hint") or lodging.get("location_hint"),
             },
             "result_limit": 10,
-            "stay_index": stay_index,
         }
+        return args
 
     def _render_bundles(self, trip_intent: Dict[str, Any]) -> str:
         wm = trip_intent.get("working_memory", {}) or {}
@@ -290,12 +386,23 @@ class Reducer(Handler):
 
         if event.type == "USER_MESSAGE":
             status["phase"] = "intake"
-            status["state"] = "collecting_requirements"
+            # Keep awaiting_confirmation so that after extractor runs, we can treat the message as confirmation
+            if status.get("state") != "awaiting_confirmation":
+                status["state"] = "collecting_requirements"
+            # New turn: clear any previous tool error so status reflects current turn
+            if "last_tool_error" in status:
+                del status["last_tool_error"]
+            # Pass current trip intent summary so the extractor can merge incrementally
+            # (e.g. "We are 4 adults" / "check-in Feb 12" update existing intent)
+            context = {
+                "timezone": (trip_intent.get("request", {}) or {}).get("timezone", "America/New_York"),
+                "current_intent": self._summarize_intent_for_tools(trip_intent),
+            }
             tool_calls.append(ToolCall(
                 name="trip_requirements_extract",
                 arguments={
                     "user_message": event.data["text"],
-                    "context": {"timezone": (trip_intent.get("request", {}) or {}).get("timezone", "America/New_York")},
+                    "context": context,
                 },
             ))
 
@@ -317,11 +424,14 @@ class Reducer(Handler):
             flight_ids = sel.get("flight_option_ids") or ([sel.get("flight_option_id")] if sel.get("flight_option_id") else [])
             hotel_ids = sel.get("hotel_option_ids") or ([sel.get("hotel_option_id")] if sel.get("hotel_option_id") else [])
             flight_quotes_all = (wm.get("flight_quotes_by_segment") or []) if wm.get("flight_quotes_by_segment") else (wm.get("flight_quotes") or [])
-            hotel_quotes_all = (wm.get("hotel_quotes_by_stay") or []) if wm.get("hotel_quotes_by_stay") else (wm.get("hotel_quotes") or [])
+            hotel_quotes_by_stay_raw = wm.get("hotel_quotes_by_stay") or []
+            hotel_quotes_all = (
+                Reducer._flatten_hotel_rooms(hotel_quotes_by_stay_raw)
+                if hotel_quotes_by_stay_raw
+                else [wm.get("hotel_quotes") or []]
+            )
             if not isinstance(flight_quotes_all[0] if flight_quotes_all else None, list):
                 flight_quotes_all = [flight_quotes_all] if flight_quotes_all else []
-            if not isinstance(hotel_quotes_all[0] if hotel_quotes_all else None, list):
-                hotel_quotes_all = [hotel_quotes_all] if hotel_quotes_all else []
             selected_flights = []
             for opts in flight_quotes_all:
                 for o in opts or []:
@@ -346,7 +456,7 @@ class Reducer(Handler):
             selected_hotel = selected_hotels[0] if selected_hotels else {}
 
             tool_calls.append(ToolCall(
-                name="policy_and_risk_check",
+                name="noma/policy_and_risk_check",
                 arguments={
                     "trip_intent": self._summarize_intent_for_tools(trip_intent),
                     "selected_flight": selected_flight,
@@ -384,7 +494,7 @@ class Reducer(Handler):
                     status["phase"] = "book"
                     status["state"] = "placing_holds"
                     tool_calls.append(ToolCall(
-                        name="reservation_hold_create",
+                        name="noma/reservation_hold_create",
                         arguments={"idempotency_key": f"hold_{trip_intent.get('trip_id')}_{sel.get('bundle_id')}", "items": items},
                     ))
 
@@ -397,7 +507,7 @@ class Reducer(Handler):
                 status["phase"] = "book"
                 status["state"] = "purchasing"
                 tool_calls.append(ToolCall(
-                    name="booking_confirm_and_purchase",
+                    name="noma/booking_confirm_and_purchase",
                     arguments={
                         "idempotency_key": f"purchase_{trip_intent.get('trip_id')}",
                         "approval_token": event.data["approval_token"],
@@ -410,7 +520,26 @@ class Reducer(Handler):
         elif event.type == "TOOL_ERROR":
             status["phase"] = "error"
             status["state"] = "retryable"
-            ui_messages.append(f"Tool error: {event.data.get('tool_name')} — {event.data.get('error')}")
+            tool_name = event.data.get("tool_name", "unknown")
+            error_text = event.data.get("error", "Unknown error")
+            ui_messages.append(f"Tool error: {tool_name} — {error_text}")
+            # Persist error in status so UI/next turn can show what failed (e.g. "last run: trip_requirements_extract failed").
+            status["last_tool_error"] = {
+                "tool_name": tool_name,
+                "error": error_text,
+                "at": int(time.time()),
+            }
+            status.setdefault("notes", []).append(
+                f"[tool_error] {tool_name} failed: {error_text}. Say 'try again' or send a new message to re-run."
+            )
+            # Return immediately with no follow-up tool_calls so the failed tool is not re-queued (avoids infinite loop).
+            output = {
+                "trip_intent": trip_intent,
+                "tool_calls": [],
+                "ui_messages": ui_messages,
+                "debug": {"phase": status.get("phase"), "state": status.get("state"), "last_tool_error": status.get("last_tool_error")},
+            }
+            return {"success": True, "input": dict(payload), "output": output, "stack": []}
 
         # TOOL_RESULT: the applier already mutated TripIntent, reducer will respond below
 
@@ -424,14 +553,81 @@ class Reducer(Handler):
         if missing:
             status["phase"] = "intake"
             status["state"] = "collecting_requirements"
-            ui_messages.append(self._build_questions(missing))
+            # Let the LLM ask what's missing instead of canned questions
+            if event.type == "USER_MESSAGE":
+                tool_calls_to_return = [tc.__dict__ for tc in tool_calls]  # run extractor first
+            else:
+                # After extractor ran: ask LLM to generate conversational follow-up questions
+                user_message = (trip_intent.get("request") or {}).get("user_message", "")
+                tool_calls_to_return = [
+                    ToolCall(
+                        name="generate_followup_questions",
+                        arguments={
+                            "trip_intent": trip_intent,
+                            "missing": missing,
+                            "user_message": user_message,
+                        },
+                    ).__dict__
+                ]
             output: ReduceTripResult = {
                 "trip_intent": trip_intent,
-                "tool_calls": [],
+                "tool_calls": tool_calls_to_return,
                 "ui_messages": ui_messages,
                 "debug": {"missing_required": missing},
             }
             return {"success": True, "input": dict(payload), "output": output, "stack": []}
+
+        # For USER_MESSAGE, return only memorialization (trip_requirements_extract). Run and persist
+        # that first. Follow-up tools (flight_quote_search, etc.) are emitted in the same user turn
+        # when the runner re-invokes the reducer with TOOL_RESULT after extraction is applied, so
+        # user input is never lost if a later tool fails.
+        if event.type == "USER_MESSAGE":
+            output = {
+                "trip_intent": trip_intent,
+                "tool_calls": [tc.__dict__ for tc in tool_calls],
+                "ui_messages": ui_messages,
+                "debug": {"missing_required": missing, "phase": status.get("phase"), "state": status.get("state")},
+            }
+            return {"success": True, "input": dict(payload), "output": output, "stack": []}
+
+        # Requirements satisfied (TOOL_RESULT from trip_requirements_extract, missing empty): show summary
+        # and require user confirmation before calling flight/hotel APIs.
+        tool_name = (event.data or {}).get("tool_name", "") if event.type == "TOOL_RESULT" else ""
+        if event.type == "TOOL_RESULT" and tool_name == "trip_requirements_extract":
+            current_state = status.get("state", "")
+            user_message = (event.data or {}).get("user_message") or (trip_intent.get("request") or {}).get("user_message", "")
+
+            if current_state != "awaiting_confirmation":
+                status["phase"] = "intake"
+                status["state"] = "awaiting_confirmation"
+                summary = self._format_trip_summary(trip_intent)
+                ui_messages.append(
+                    summary + "\n\nIf this looks correct, reply **Yes** or **Looks good** to search for flights and hotels. "
+                    "If something needs to change, tell us what to update."
+                )
+                output = {
+                    "trip_intent": trip_intent,
+                    "tool_calls": [],
+                    "ui_messages": ui_messages,
+                    "debug": {"missing_required": missing, "phase": status.get("phase"), "state": status.get("state")},
+                }
+                return {"success": True, "input": dict(payload), "output": output, "stack": []}
+
+            if not self._is_confirmation(user_message):
+                summary = self._format_trip_summary(trip_intent)
+                ui_messages.append(
+                    summary + "\n\nReply **Yes** or **Looks good** when you’re ready to search, or tell us what to change."
+                )
+                output = {
+                    "trip_intent": trip_intent,
+                    "tool_calls": [],
+                    "ui_messages": ui_messages,
+                    "debug": {"missing_required": missing, "phase": status.get("phase"), "state": status.get("state")},
+                }
+                return {"success": True, "input": dict(payload), "output": output, "stack": []}
+
+            status["state"] = "ready_to_quote"
+            ui_messages.append("Searching for flights and hotels…")
 
         lodging_needed = (trip_intent.get("itinerary", {}) or {}).get("lodging", {}).get("needed", True)
         flight_segment_indices = self._get_flight_segment_indices(trip_intent)
@@ -450,7 +646,7 @@ class Reducer(Handler):
                 status["state"] = "quoting_flights"
                 args = self._build_flight_quote_args(trip_intent, segment_index=seg_idx)
                 if args:
-                    tool_calls.append(ToolCall(name="flight_quote_search", arguments=args))
+                    tool_calls.append(ToolCall(name="noma/flight_quote_search", arguments=args))
                 break
 
         if lodging_needed and effective_stays and not tool_calls:
@@ -459,7 +655,7 @@ class Reducer(Handler):
                 if not stay_quotes:
                     status["phase"] = "quote"
                     status["state"] = "quoting_hotels"
-                    tool_calls.append(ToolCall(name="hotel_quote_search", arguments=self._build_hotel_quote_args(trip_intent, stay_index=j, stay=stay)))
+                    tool_calls.append(ToolCall(name="noma/hotel_quote_search", arguments=self._build_hotel_quote_args(trip_intent, stay_index=j, stay=stay)))
                     break
 
         has_all_flight_quotes = (
@@ -482,11 +678,26 @@ class Reducer(Handler):
             }
             if use_multi and (flight_quotes_by_seg or hotel_quotes_by_stay):
                 ranker_args["flight_options_by_segment"] = flight_quotes_by_seg or [flight_quotes_flat]
-                ranker_args["hotel_options_by_stay"] = hotel_quotes_by_stay or [hotel_quotes_flat]
+                ranker_args["hotel_options_by_stay"] = (
+                    Reducer._flatten_hotel_rooms(hotel_quotes_by_stay) or [hotel_quotes_flat]
+                )
+                room_counts = []
+                for stay in (hotel_quotes_by_stay or []):
+                    if not stay:
+                        room_counts.append(0)
+                    elif isinstance(stay[0], dict):
+                        room_counts.append(1)
+                    else:
+                        room_counts.append(len(stay))
+                if room_counts:
+                    ranker_args["room_counts_per_stay"] = room_counts
+                    occupancies = Reducer._room_occupancies_from_travelers(trip_intent)
+                    if occupancies and sum(occupancies) > 0:
+                        ranker_args["room_occupancies"] = occupancies
             else:
                 ranker_args["flight_options"] = wm.get("flight_quotes") or []
                 ranker_args["hotel_options"] = wm.get("hotel_quotes") or []
-            tool_calls.append(ToolCall(name="trip_option_ranker", arguments=ranker_args))
+            tool_calls.append(ToolCall(name="noma/trip_option_ranker", arguments=ranker_args))
 
         # Present bundles
         if (wm.get("ranked_bundles") or []) and status.get("state") in ("presenting_options", "ranking_bundles", "have_flight_quotes", "have_hotel_quotes"):
@@ -539,7 +750,7 @@ class Reducer(Handler):
         assert "output" in out and "stack" in out
         o = out["output"]
         assert "trip_intent" in o and "tool_calls" in o and "ui_messages" in o and "debug" in o
-        assert o["tool_calls"] == [], "missing required → no tool calls, only questions"
-        assert len(o["ui_messages"]) > 0, "missing required should produce questions"
+        # USER_MESSAGE with missing required: return only trip_requirements_extract so memorialization runs first
+        assert len(o["tool_calls"]) == 1 and o["tool_calls"][0].get("name") == "trip_requirements_extract"
         assert out["stack"] == []
         return True

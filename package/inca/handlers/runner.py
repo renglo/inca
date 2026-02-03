@@ -5,7 +5,10 @@ import json
 import re
 import time
 from contextvars import ContextVar
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from .common.types import Event, Handler, RunnerHandlerReturn, RunnerPayload, RunnerResult, ToolCall, handler_output
@@ -38,6 +41,13 @@ class RunnerContext:
 runner_context: ContextVar[RunnerContext] = ContextVar("runner_context", default=RunnerContext())
 
 
+def _json_serializable_default(obj: Any) -> Any:
+    """Default for json.dumps so Decimal and other non-JSON types are serializable."""
+    if isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 class Runner(Handler):
     """
     Entrypoint handler (v1): responses_mission_runner
@@ -49,8 +59,10 @@ class Runner(Handler):
       - Run reducer
       - Execute reducer tool calls deterministically as a "mission queue":
           SHC.handler_call -> applier -> reducer(TOOL_RESULT) -> enqueue follow-ups
+      - For USER_MESSAGE, reducer returns only trip_requirements_extract so memorialization
+        runs and is persisted before any quote/search tools (which may fail) are attempted.
       - Optionally call OpenAI Responses API for extra tool calls and/or text
-      - Emit UI output through self.AGU.print_chat only (no other handler prints)
+      - Emit UI output through self.AGU.save_chat only (no other handler prints)
       - Save TripIntent after each mutation
     """
 
@@ -95,7 +107,13 @@ class Runner(Handler):
             "trip_id": trip_id,
             "created_at": now,
             "updated_at": now,
-            "request": {"user_message": user_message, "locale": "en-US", "timezone": "America/New_York"},
+            "request": {
+                "user_message": user_message,
+                "locale": "en-US",
+                "timezone": "America/New_York",
+                "now_iso": None,
+                "now_date": None,
+            },
             "status": {
                 "phase": "intake",
                 "state": "collecting_requirements",
@@ -106,6 +124,7 @@ class Runner(Handler):
             "party": {
                 "travelers": {"adults": 0, "children": 0, "infants": 0},
                 "traveler_profile_ids": [],
+                "guests": [],
                 "contact": {"email": None, "phone": None},
             },
             "itinerary": {
@@ -115,8 +134,6 @@ class Runner(Handler):
                     "needed": True,
                     "check_in": None,
                     "check_out": None,
-                    "rooms": 1,
-                    "guests_per_room": 2,
                     "location_hint": None,
                     "stays": [],
                 },
@@ -138,6 +155,223 @@ class Runner(Handler):
             },
             "audit": {"events": []},
         }
+
+    # -------------------------------------------------------------------------
+    # trip_requirements_extract (LLM-based, uses self.AGU.llm)
+    # -------------------------------------------------------------------------
+
+    def _call_trip_requirements_extract(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract trip requirements from user_message using LLM. Merges with context.current_intent.
+        Returns the format expected by the applier: trip_intent, missing_required_fields, clarifying_questions.
+        """
+        user_message = (arguments.get("user_message") or "").strip()
+        context = arguments.get("context") or {}
+        timezone = context.get("timezone", "America/New_York")
+        current_intent = context.get("current_intent") or {}
+
+        try:
+            tz = ZoneInfo(timezone) if timezone else ZoneInfo("America/New_York")
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+        now_dt = datetime.now(tz)
+        now_iso = now_dt.isoformat()
+        now_date = now_dt.strftime("%Y-%m-%d")
+
+        prompt_text = f"""You are a travel requirements extractor. Humans communicate in fragments and often change their mind. Your job is to incrementally assemble the trip from whatever the user says and the current state.
+
+Time context (use for all date decisions):
+- Today's date and time (user timezone): {now_iso}
+- Today's date (YYYY-MM-DD): {now_date}
+
+Rules:
+- Merge this message with current_intent: add, update, or remove only what this message implies. Output only fields you can infer from this message; leave others absent so they are merged from current state. The user may correct themselves (e.g. "actually 2 adults") or add one detail at a time.
+- CRITICAL — Preserve full itinerary on partial corrections: When current_intent already has multiple segments and/or stays (multi-city), and the user message only corrects or adds ONE detail (e.g. "we depart from JFK", "remember we're flying from JFK", "departure is June 1st", "actually 2 adults"), you MUST output the SAME number and sequence of segments and stays as in current_intent. Only update the specific field mentioned (e.g. set first segment origin to JFK). Do NOT output a shorter or simplified itinerary that drops cities already in current_intent. If the user fully rephrases the trip ("we're doing X then Y then Z"), then output the new full itinerary; but for short corrections or reminders, preserve every segment and stay.
+- Dates must be YYYY-MM-DD. All trip dates (departure_date, return_date, check_in, check_out) must be on or after today ({now_date}). If the user says a date without a year or a date in the past, use the next occurrence in the future (e.g. if today is 2026-01-29 and the user says "March 12", use 2026-03-12).
+- Origin/destination: use IATA airport codes when possible (e.g. Newark->EWR, JFK, San Francisco->SFO, Los Angeles->LAX, Dallas->DFW, Miami->MIA, Orlando->MCO).
+- Multi-city: When the user says they fly to multiple cities in sequence (e.g. "Dallas to Miami for 3 days then to Orlando for 2 days"), you MUST output "segments" (one flight leg per segment) and "stays" (one stay per city). First segment origin = departure city (e.g. JFK if "flying from JFK"); then one leg per city-to-city; include return to origin as last segment. Example: "JFK to San Francisco then LA then back to JFK" → segments = [{{"origin": "JFK", "destination": "SFO", "depart_date": "..."}}, {{"origin": "SFO", "destination": "LAX", "depart_date": "..."}}, {{"origin": "LAX", "destination": "JFK", "depart_date": "..."}}]; stays = [{{"location_code": "SFO", "check_in": "...", "check_out": "..."}}, {{"location_code": "LAX", "check_in": "...", "check_out": "..."}}]. Infer dates: "3 days" means check_out = check_in + 3 days; next stay's check_in = previous stay's check_out; next segment's depart_date = day user leaves that city (e.g. same as that stay's check_out).
+- travelers: object with adults (required), children, infants (integers, default 0).
+- List missing_required_fields as paths still needed for quoting: e.g. ["party.travelers.adults", "itinerary.lodging.stays[0].check_in", "itinerary.segments[0].destination.code"]. For multi_city include each segment and each stay (e.g. itinerary.segments[1].destination.code, itinerary.lodging.stays[1].location_code). Use [] when nothing is missing.
+- clarifying_questions: array of strings (can be empty).
+Return ONLY valid JSON, no markdown or explanation.
+
+Output schema (return exactly this structure; for multi_city include segments and stays arrays):
+{{
+  "trip_intent": {{
+    "origin": "IATA or null (first segment origin if multi_city)",
+    "destination": "IATA or null (first segment destination if multi_city)",
+    "trip_type": "one_way|round_trip|multi_city or null",
+    "dates": {{ "departure_date": "YYYY-MM-DD or null", "return_date": "YYYY-MM-DD or null" }},
+    "segments": [{{ "origin": "IATA", "destination": "IATA", "depart_date": "YYYY-MM-DD" }}] or omit if single origin/destination,
+    "stays": [{{ "location_code": "IATA or city code", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD" }}] or omit if single lodging,
+    "travelers": {{ "adults": number, "children": number, "infants": number }},
+    "lodging": {{ "needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null" }},
+    "cabin": "economy or null",
+    "constraints": {{ "max_stops": number, "avoid_red_eye": boolean }}
+  }},
+  "missing_required_fields": ["path1", "path2"],
+  "clarifying_questions": ["question1"]
+}}
+
+User message: {user_message}
+
+Current intent (merge with this; only overwrite fields the user message provides):
+{json.dumps(current_intent, indent=2, default=_json_serializable_default)}
+
+Timezone: {timezone}
+Today (YYYY-MM-DD): {now_date}
+"""
+
+        try:
+            prompt = {
+                "model": getattr(self.AGU, "AI_2_MODEL", "gpt-4o-mini"),
+                "messages": [{"role": "user", "content": prompt_text}],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            }
+            response = self.AGU.llm(prompt)
+            print(f'LLM Response>> Requirement Extraction:{response}')
+            if not response or not getattr(response, "content", None):
+                return {
+                    "success": False,
+                    "trip_intent": {},
+                    "missing_required_fields": [
+                        "party.travelers.adults",
+                        "itinerary.segments",
+                        "itinerary.lodging.check_in",
+                        "itinerary.lodging.check_out",
+                    ],
+                    "clarifying_questions": ["I couldn't parse that. Can you tell me origin, destination, dates, and number of travelers?"],
+                }
+            raw = response.content
+            if hasattr(self.AGU, "clean_json_response") and callable(self.AGU.clean_json_response):
+                parsed = self.AGU.clean_json_response(raw)
+            else:
+                parsed = json.loads(raw)
+            trip_intent = (parsed.get("trip_intent") or {}) if isinstance(parsed.get("trip_intent"), dict) else {}
+            trip_intent = self._normalize_extract_trip_intent(trip_intent, now_date=now_date)
+            missing = parsed.get("missing_required_fields")
+            if not isinstance(missing, list):
+                missing = []
+            clarifying = parsed.get("clarifying_questions")
+            if not isinstance(clarifying, list):
+                clarifying = []
+            return {
+                "success": True,
+                "trip_intent": trip_intent,
+                "missing_required_fields": missing,
+                "clarifying_questions": clarifying,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "trip_intent": {},
+                "missing_required_fields": [
+                    "party.travelers.adults",
+                    "itinerary.segments",
+                    "itinerary.lodging.check_in",
+                    "itinerary.lodging.check_out",
+                ],
+                "clarifying_questions": [f"I had trouble understanding: {str(e)}. Please tell me origin, destination, dates, and number of travelers."],
+            }
+
+    def _normalize_extract_trip_intent(self, trip_intent: Dict[str, Any], now_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Coerce LLM-extracted trip_intent: numeric fields to int; clamp date fields to >= now_date.
+        Ensures adults, children, infants are int; strips rooms/guests_per_room from lodging; dates are never in the past.
+        """
+        if not trip_intent:
+            return trip_intent
+        out = dict(trip_intent)
+
+        travelers = out.get("travelers")
+        if isinstance(travelers, dict):
+            t = dict(travelers)
+            for key in ("adults", "children", "infants"):
+                if key in t and t[key] is not None:
+                    try:
+                        t[key] = int(t[key])
+                    except (TypeError, ValueError):
+                        t[key] = 1 if key == "adults" else 0
+            out["travelers"] = t
+
+        lodging = out.get("lodging")
+        if isinstance(lodging, dict):
+            lod = dict(lodging)
+            for key in ("rooms", "guests_per_room"):
+                lod.pop(key, None)
+            out["lodging"] = lod
+
+        if now_date:
+            def clamp_date(d: Optional[str]) -> Optional[str]:
+                if not d or not isinstance(d, str) or len(d) != 10:
+                    return d
+                return d if d >= now_date else now_date
+
+            dates = out.get("dates")
+            if isinstance(dates, dict):
+                out["dates"] = dict(dates)
+                if "departure_date" in out["dates"] and out["dates"]["departure_date"]:
+                    out["dates"]["departure_date"] = clamp_date(out["dates"]["departure_date"])
+                if "return_date" in out["dates"] and out["dates"]["return_date"]:
+                    out["dates"]["return_date"] = clamp_date(out["dates"]["return_date"])
+            lod = out.get("lodging")
+            if isinstance(lod, dict):
+                out["lodging"] = dict(lod)
+                if lod.get("check_in"):
+                    out["lodging"]["check_in"] = clamp_date(lod["check_in"])
+                if lod.get("check_out"):
+                    out["lodging"]["check_out"] = clamp_date(lod["check_out"])
+            for seg in out.get("segments") or []:
+                if isinstance(seg, dict) and seg.get("depart_date"):
+                    seg["depart_date"] = clamp_date(seg["depart_date"])
+            for stay in out.get("stays") or []:
+                if isinstance(stay, dict):
+                    if stay.get("check_in"):
+                        stay["check_in"] = clamp_date(stay["check_in"])
+                    if stay.get("check_out"):
+                        stay["check_out"] = clamp_date(stay["check_out"])
+
+        return out
+
+    def _call_generate_followup_questions(self, arguments: Dict[str, Any]) -> str:
+        """
+        Ask the LLM to generate 1-3 short, conversational questions for what's still missing.
+        Uses full trip_intent and missing paths so the LLM can ask in context.
+        """
+        trip_intent = arguments.get("trip_intent") or {}
+        missing = arguments.get("missing") or []
+        user_message = (arguments.get("user_message") or "").strip()
+
+        if not missing:
+            return ""
+
+        trip_snapshot = json.dumps(trip_intent, indent=2, default=_json_serializable_default)
+        missing_str = ", ".join(missing)
+
+        prompt_text = f"""You are helping the user plan a trip. We have partial trip details and still need a few things to get quotes.
+
+Current trip state (partial):
+{trip_snapshot}
+
+Fields still missing for quoting: {missing_str}
+
+The user just said: "{user_message}"
+
+Generate 1-3 short, natural, conversational questions to ask the user to fill in what's missing. Be friendly and concise. Speak directly to the user (e.g. "When would you like to fly?" not "The user should provide..."). Return only the questions as plain text; you can use line breaks or a short paragraph. No JSON, no numbering unless it reads naturally."""
+
+        try:
+            prompt = {
+                "model": getattr(self.AGU, "AI_2_MODEL", "gpt-4o-mini"),
+                "messages": [{"role": "user", "content": prompt_text}],
+                "temperature": 0.3,
+            }
+            response = self.AGU.llm(prompt)
+            if not response or not getattr(response, "content", None):
+                return "To get your quotes I still need: departure date, and hotel check-in and check-out dates. Can you share those?"
+            return (response.content or "").strip()
+        except Exception as e:
+            return f"I still need a few details to find options — when are you traveling, and what are your hotel check-in and check-out dates?"
 
     # -------------------------------------------------------------------------
     # Lightweight user-message router (v1)
@@ -182,6 +416,9 @@ class Runner(Handler):
     # Deterministic tool execution queue
     # -------------------------------------------------------------------------
 
+    MAX_TOOL_RUNS_PER_TURN = 50
+    MAX_RUNS_PER_TOOL_NAME = 3
+
     def _run_tool_queue_and_followups(
         self,
         *,
@@ -197,8 +434,10 @@ class Runner(Handler):
           - reducer(TOOL_RESULT) emits follow-ups
           - follow-ups appended to queue immediately
 
+        Safeguards: max MAX_TOOL_RUNS_PER_TURN total runs per turn; max MAX_RUNS_PER_TOOL_NAME
+        runs per tool name. Exceeding either stops the loop to avoid runaway.
         If stack is provided, appends each applier and reducer result to it.
-        portfolio, org come from request context. UI output via self.AGU.print_chat.
+        portfolio, org come from request context. UI output via self.AGU.save_chat.
         """
         ctx = self._get_context()
         portfolio = ctx.portfolio
@@ -206,24 +445,57 @@ class Runner(Handler):
 
         queue: List[ToolCall] = list(tool_queue)
         if stack is None:
-            stack = [] # This list will not be passed back to caller. 
+            stack = []  # This list will not be passed back to caller.
+
+        run_count = 0
+        tool_run_count: Dict[str, int] = {}
 
         while queue:
-            tc = queue.pop(0)
-            try:
-                parts = tc.name.split('/')
-                if len(parts) == 1:
-                    tool = "tools"
-                    handler = tc.name
-                elif len(parts) >= 2 and len(parts) <= 3:
-                    tool = parts[0]
-                    handler = '/'.join(parts[1:])
-                else:
-                    error_msg = f"❌ {tc.name} is not a valid tool. Use 'handler' or 'tool/handler' or 'tool/handler/subhandler'."
-                    self.AGU.print_chat(error_msg, "error")
-                    raise ValueError(error_msg)
+            run_count += 1
+            if run_count > self.MAX_TOOL_RUNS_PER_TURN:
+                status = trip_intent.setdefault("status", {})
+                status["phase"] = "error"
+                status["state"] = "retryable"
+                status.setdefault("notes", []).append(
+                    "[runaway] Too many tool runs this turn; stopping to avoid loop. Say 'try again' or send a new message."
+                )
+                self.trip_store.save(trip_id, trip_intent)
+                self.AGU.save_chat({"role": "assistant", "content": "Something went wrong after many steps. Please try again or send a new message."})
+                break
 
-                result = self.SHC.handler_call(portfolio, org, tool, handler, tc.arguments)
+            tc = queue.pop(0)
+            if tool_run_count.get(tc.name, 0) >= self.MAX_RUNS_PER_TOOL_NAME:
+                status = trip_intent.setdefault("status", {})
+                status.setdefault("notes", []).append(f"[runaway] Skipping {tc.name}: already run {self.MAX_RUNS_PER_TOOL_NAME} times this turn.")
+                self.trip_store.save(trip_id, trip_intent)
+                continue
+
+            tool_run_count[tc.name] = tool_run_count.get(tc.name, 0) + 1
+
+            try:
+                if tc.name == "trip_requirements_extract":
+                    print(f"[IncaRunner] Calling _call_trip_requirements_extract (internal; handler_call not used)")
+                    result = self._call_trip_requirements_extract(tc.arguments)
+                    print(f"[IncaRunner] trip_requirements_extract result success={result.get('success')}")
+                elif tc.name == "generate_followup_questions":
+                    msg = self._call_generate_followup_questions(tc.arguments)
+                    if msg:
+                        self.AGU.save_chat({"role": "assistant", "content": msg})
+                    continue
+                else:
+                    # Tool names are always "x/y" (extension/handler) or "x/y/z" (extension/handler/subhandler).
+                    parts = tc.name.split('/')
+                    if len(parts) < 2:
+                        error_msg = f"❌ {tc.name} is not a valid tool. Use 'extension/handler' or 'extension/handler/subhandler'."
+                        self.AGU.print_chat(error_msg, "error")
+                        raise ValueError(error_msg)
+                    extension = parts[0]
+                    handler = '/'.join(parts[1:])
+                    result = self.SHC.handler_call(portfolio, org, extension, handler, tc.arguments)
+                # Treat handler_call failure (no exception but success=False) as TOOL_ERROR so we don't apply bad result or re-queue.
+                if not result.get("success"):
+                    err_msg = result.get("output") or result.get("error") or "Handler call failed"
+                    raise RuntimeError(err_msg if isinstance(err_msg, str) else str(err_msg))
             except Exception as e:
                 reduced_err = self.reducer.run({
                     "trip_intent": trip_intent,
@@ -234,26 +506,47 @@ class Runner(Handler):
                 trip_intent = out_err["trip_intent"]
                 self.trip_store.save(trip_id, trip_intent)
                 for msg in (out_err.get("ui_messages") or []):
-                    self.AGU.print_chat(msg)
+                    m = { "role": "assistant", "content":f'{msg}'}
+                    self.AGU.save_chat(m)
                 continue
 
-            applied = self.applier.run({"trip_intent": trip_intent, "tool_name": tc.name, "result": result, "arguments": tc.arguments})
+            # Pass handler output (canonical) to applier so it receives { options } / { bundles } etc.
+            result_for_applier = result.get("output", result) if isinstance(result.get("output"), dict) else result
+            applied = self.applier.run({"trip_intent": trip_intent, "tool_name": tc.name, "result": result_for_applier, "arguments": tc.arguments})
             stack.append(applied)
             out_applied = handler_output(applied)
             trip_intent = out_applied["trip_intent"]
+            wm = trip_intent.setdefault("working_memory", {})
+            if tc.name == "noma/trip_option_ranker":
+                bundles_from_result = result_for_applier.get("bundles", []) if isinstance(result_for_applier, dict) else []
+                wm["ranked_bundles"] = bundles_from_result
+            status = trip_intent.setdefault("status", {})
+            status.setdefault("notes", []).append(
+                "[tool_success] " + tc.name + " | input: " + json.dumps(tc.arguments, default=_json_serializable_default)
+            )
             self.trip_store.save(trip_id, trip_intent)
 
+            event_data: Dict[str, Any] = {"tool_name": tc.name, "result": result}
+            if tc.name == "trip_requirements_extract" and tc.arguments:
+                event_data["user_message"] = tc.arguments.get("user_message", "")
             reduced = self.reducer.run({
                 "trip_intent": trip_intent,
-                "event": {"type": "TOOL_RESULT", "data": {"tool_name": tc.name, "result": result}},
+                "event": {"type": "TOOL_RESULT", "data": event_data},
             })
             stack.append(reduced)
             out_reduced = handler_output(reduced)
             trip_intent = out_reduced["trip_intent"]
             self.trip_store.save(trip_id, trip_intent)
 
-            for msg in (out_reduced.get("ui_messages") or []):
-                self.AGU.print_chat(msg)
+            ui_msgs = out_reduced.get("ui_messages") or []
+            wm = trip_intent.get("working_memory") or {}
+            ranked_bundles = wm.get("ranked_bundles") or []
+            if ui_msgs and ranked_bundles:
+                self.AGU.save_chat(ranked_bundles, interface="bundle", msg_type="widget")
+                ui_msgs = [msg for msg in ui_msgs if not (isinstance(msg, str) and msg.strip().startswith("Here are the top options"))]
+            for msg in ui_msgs:
+                m = {"role": "assistant", "content": f"{msg}"}
+                self.AGU.save_chat(m)
 
             followups = [ToolCall(**x) for x in (out_reduced.get("tool_calls") or [])]
             queue.extend(followups)
@@ -265,6 +558,7 @@ class Runner(Handler):
     # -------------------------------------------------------------------------
 
     def run(self, payload: RunnerPayload | Dict[str, Any]) -> RunnerHandlerReturn:
+        function = 'run > runner'
         """
         payload:
           portfolio, org, entity_type, entity_id, thread (required);
@@ -331,14 +625,32 @@ class Runner(Handler):
             user_text=user_text,
         )
         self._set_context(ctx)
+        
+        stack: List[Dict[str, Any]] = []
+        
+        # Create thread/message document
+        print('Creating document for this turn ...')
+        created= self.AGU.new_chat_message_document(user_text)
+        stack.append(created)  
+        if not created['success']:
+            return {'success':False,'function':function,'output':created,'stack':stack}
+            
 
         # Load or init TripIntent
         trip_intent = self.trip_store.get(trip_id)
         if not trip_intent:
             trip_intent = self._new_trip_intent(trip_id, user_text)
 
-        # Update request context + timestamps
-        trip_intent.setdefault("request", {})["user_message"] = user_text
+        # Update request context + timestamps + current time (so dates are always in the future)
+        req = trip_intent.setdefault("request", {})
+        req["user_message"] = user_text
+        try:
+            tz = ZoneInfo(req.get("timezone") or "America/New_York")
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+        now_dt = datetime.now(tz)
+        req["now_iso"] = now_dt.isoformat()
+        req["now_date"] = now_dt.strftime("%Y-%m-%d")
         trip_intent["updated_at"] = int(time.time())
 
         # Route user message -> Event
@@ -352,15 +664,22 @@ class Runner(Handler):
         })
 
         # 1) Reduce the event
-        stack: List[Dict[str, Any]] = []
+        
         reduced = self.reducer.run({"trip_intent": trip_intent, "event": {"type": event.type, "data": event.data}})
         stack.append(reduced)
         out = handler_output(reduced)
         trip_intent = out["trip_intent"]
         self.trip_store.save(trip_id, trip_intent)
 
-        for msg in (out.get("ui_messages") or []):
-            self.AGU.print_chat(msg)
+        ui_msgs = out.get("ui_messages") or []
+        wm = trip_intent.get("working_memory") or {}
+        ranked_bundles = wm.get("ranked_bundles") or []
+        if ui_msgs and ranked_bundles:
+            self.AGU.save_chat(ranked_bundles, interface="bundle", msg_type="widget")
+            ui_msgs = [msg for msg in ui_msgs if not (isinstance(msg, str) and msg.strip().startswith("Here are the top options"))]
+        for msg in ui_msgs:
+            m = {"role": "assistant", "content": f"{msg}"}
+            self.AGU.save_chat(m)
 
         # 2) Execute reducer tool calls deterministically + followups
         initial_calls = [ToolCall(**tc) for tc in (out.get("tool_calls") or [])]
@@ -381,7 +700,7 @@ class Runner(Handler):
             input_items: List[Dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "developer", "content": developer_prompt},
-                {"role": "developer", "content": "TRIP_INTENT_JSON:\n" + json.dumps(trip_intent)},
+                {"role": "developer", "content": "TRIP_INTENT_JSON:\n" + json.dumps(trip_intent, default=_json_serializable_default)},
                 {"role": "user", "content": user_text},
             ]
 
@@ -389,7 +708,8 @@ class Runner(Handler):
                 resp = self.openai_client.create_response(input_items=input_items, tools=tools)
                 out_text = extract_output_text(resp)
                 if out_text:
-                    self.AGU.print_chat(out_text)
+                    m = { "role": "assistant", "content":f'{out_text}'}
+                    self.AGU.save_chat(m)
 
                 model_calls = extract_tool_calls(resp)
                 if not model_calls:
@@ -402,7 +722,7 @@ class Runner(Handler):
                     stack=stack,
                 )
 
-                input_items.append({"role": "developer", "content": "TRIP_INTENT_JSON:\n" + json.dumps(trip_intent)})
+                input_items.append({"role": "developer", "content": "TRIP_INTENT_JSON:\n" + json.dumps(trip_intent, default=_json_serializable_default)})
 
         self.trip_store.save(trip_id, trip_intent)
         output: RunnerResult = {"ok": True, "trip_id": trip_id, "status": trip_intent.get("status", {})}
