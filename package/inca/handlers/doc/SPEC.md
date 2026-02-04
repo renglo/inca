@@ -1,4 +1,4 @@
-README.md
+SPEC.md
 
 
 V1 Spec: “Mission Runner + Reducer + Applier + Patcher + Tool Handlers”
