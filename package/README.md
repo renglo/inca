@@ -1,4 +1,4 @@
-# Inca Package
+# Incremental Agent (IncA)
 
 Travel/trip intent handlers (Runner, Reducer, Applier, Patcher, Tools), packaged as a proper Python library.
 
