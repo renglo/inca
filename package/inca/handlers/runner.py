@@ -548,6 +548,9 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
                 m = {"role": "assistant", "content": f"{msg}"}
                 self.AGU.save_chat(m)
 
+            if ranked_bundles:
+                self.trip_store.save(trip_id, trip_intent)
+
             followups = [ToolCall(**x) for x in (out_reduced.get("tool_calls") or [])]
             queue.extend(followups)
 
