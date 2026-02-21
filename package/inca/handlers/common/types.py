@@ -84,6 +84,16 @@ class RunnerPayload(TypedDict):
     user_text: NotRequired[str]
 
 
+class SprinterPayload(TypedDict):
+    portfolio: str
+    org: str
+    entity_type: str
+    entity_id: str
+    thread: str
+    trip_intent: Dict[str, Any]
+    connection_id: NotRequired[str]
+
+
 class RunnerResult(TypedDict):
     ok: bool
     trip_id: str
@@ -126,6 +136,13 @@ class ReducerHandlerReturn(TypedDict):
 class RunnerHandlerReturn(TypedDict):
     success: bool
     input: RunnerPayload
+    output: RunnerResult
+    stack: List[Dict[str, Any]]
+
+
+class SprinterHandlerReturn(TypedDict):
+    success: bool
+    input: SprinterPayload
     output: RunnerResult
     stack: List[Dict[str, Any]]
 
@@ -173,6 +190,7 @@ EventType = Literal[
     "USER_APPROVED_PURCHASE",
     "TOOL_RESULT",
     "TOOL_ERROR",
+    "INTENT_READY",
 ]
 
 @dataclass

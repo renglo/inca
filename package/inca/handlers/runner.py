@@ -18,6 +18,7 @@ from .common.openai_adapter import AgentUtilitiesOpenAIResponsesClient, extract_
 from .applier import Applier
 from .patcher import Patcher
 from .reducer import Reducer
+from .common.reducer_llm import ReducerLLMClientFromOpenAI
 
 from renglo.common import load_config
 from renglo.data.data_controller import DataController
@@ -46,6 +47,19 @@ def _json_serializable_default(obj: Any) -> Any:
     if isinstance(obj, Decimal):
         return int(obj) if obj % 1 == 0 else float(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _format_conversation_for_prompt(messages: List[Dict[str, Any]]) -> str:
+    """Format conversation history for LLM prompt."""
+    if not messages:
+        return "(none)"
+    lines = []
+    for m in messages[-12:]:
+        role = (m.get("role") or "user").lower()
+        content = m.get("content") or ""
+        if isinstance(content, str) and content.strip():
+            lines.append(f"{role}: {content[:300]}")
+    return "\n".join(lines) if lines else "(none)"
 
 
 class Runner(Handler):
@@ -82,7 +96,11 @@ class Runner(Handler):
         self.openai_client = AgentUtilitiesOpenAIResponsesClient(get_agu=lambda: self.AGU)
         self.patcher = Patcher()
         self.applier = Applier(patcher=self.patcher)
-        self.reducer = Reducer()
+        self.reducer = Reducer(
+            llm_client=ReducerLLMClientFromOpenAI(
+                create_response=lambda *a, **kw: self.openai_client.create_response(*a, **kw)
+            )
+        )
 
     def _get_context(self) -> RunnerContext:
         return runner_context.get()
@@ -169,6 +187,7 @@ class Runner(Handler):
         context = arguments.get("context") or {}
         timezone = context.get("timezone", "America/New_York")
         current_intent = context.get("current_intent") or {}
+        conversation_history = context.get("conversation_history") or []
 
         try:
             tz = ZoneInfo(timezone) if timezone else ZoneInfo("America/New_York")
@@ -187,12 +206,13 @@ Time context (use for all date decisions):
 Rules:
 - Merge this message with current_intent: add, update, or remove only what this message implies. Output only fields you can infer from this message; leave others absent so they are merged from current state. The user may correct themselves (e.g. "actually 2 adults") or add one detail at a time.
 - CRITICAL — Preserve full itinerary on partial corrections: When current_intent already has multiple segments and/or stays (multi-city), and the user message only corrects or adds ONE detail (e.g. "we depart from JFK", "remember we're flying from JFK", "departure is June 1st", "actually 2 adults"), you MUST output the SAME number and sequence of segments and stays as in current_intent. Only update the specific field mentioned (e.g. set first segment origin to JFK). Do NOT output a shorter or simplified itinerary that drops cities already in current_intent. If the user fully rephrases the trip ("we're doing X then Y then Z"), then output the new full itinerary; but for short corrections or reminders, preserve every segment and stay.
+- CRITICAL — Partial date changes: When the user says "change arrival to X" or "get there on X" or "arrive on X" but "leave everything else same" (or similar), ONLY update: (1) first segment depart_date = X, (2) first stay check_in = X. KEEP return_date, last segment depart_date, and check_out UNCHANGED from current_intent. "Arrival" = when you land at destination = outbound depart_date = hotel check_in. Never set check_out = check_in (same-day checkout is invalid unless explicitly requested).
 - Dates must be YYYY-MM-DD. All trip dates (departure_date, return_date, check_in, check_out) must be on or after today ({now_date}). If the user says a date without a year or a date in the past, use the next occurrence in the future (e.g. if today is 2026-01-29 and the user says "March 12", use 2026-03-12).
 - Origin/destination: use IATA airport codes when possible (e.g. Newark->EWR, JFK, San Francisco->SFO, Los Angeles->LAX, Dallas->DFW, Miami->MIA, Orlando->MCO).
-- Multi-city: When the user says they fly to multiple cities in sequence (e.g. "Dallas to Miami for 3 days then to Orlando for 2 days"), you MUST output "segments" (one flight leg per segment) and "stays" (one stay per city). First segment origin = departure city (e.g. JFK if "flying from JFK"); then one leg per city-to-city; include return to origin as last segment. Example: "JFK to San Francisco then LA then back to JFK" → segments = [{{"origin": "JFK", "destination": "SFO", "depart_date": "..."}}, {{"origin": "SFO", "destination": "LAX", "depart_date": "..."}}, {{"origin": "LAX", "destination": "JFK", "depart_date": "..."}}]; stays = [{{"location_code": "SFO", "check_in": "...", "check_out": "..."}}, {{"location_code": "LAX", "check_in": "...", "check_out": "..."}}]. Infer dates: "3 days" means check_out = check_in + 3 days; next stay's check_in = previous stay's check_out; next segment's depart_date = day user leaves that city (e.g. same as that stay's check_out).
+- Multi-city: When the user says they fly to multiple cities in sequence (e.g. "Dallas to Miami for 3 days then to Orlando for 2 days"), you MUST output "segments" (one flight leg per segment) and "stays" (one stay per city). First segment origin = departure city (e.g. JFK if "flying from JFK"); then one leg per city-to-city; include return to origin as last segment. Example: "JFK to San Francisco then LA then back to JFK" → segments = [{{"origin": "JFK", "destination": "SFO", "depart_date": "..."}}, {{"origin": "SFO", "destination": "LAX", "depart_date": "..."}}, {{"origin": "LAX", "destination": "JFK", "depart_date": "..."}}]; stays = [{{"location_code": "SFO", "check_in": "...", "check_out": "..."}}, {{"location_code": "LAX", "check_in": "...", "check_out": "..."}}]. Infer dates: "3 days" means check_out = check_in + 3 days; next stay's check_in = previous stay's check_out; next segment's depart_date = day user leaves that city (e.g. same as that stay's check_out). CRITICAL: Each stay must have at least 1 night—check_out must be AFTER check_in. When adding a new city (e.g. "add San Francisco after Las Vegas"), the new stay's check_in = when you arrive (previous stay's check_out), check_out = check_in + 1 day minimum, and the next segment's depart_date = that check_out.
 - travelers: object with adults (required), children, infants (integers, default 0).
 - List missing_required_fields as paths still needed for quoting: e.g. ["party.travelers.adults", "itinerary.lodging.stays[0].check_in", "itinerary.segments[0].destination.code"]. For multi_city include each segment and each stay (e.g. itinerary.segments[1].destination.code, itinerary.lodging.stays[1].location_code). Use [] when nothing is missing.
-- clarifying_questions: array of strings (can be empty).
+- clarifying_questions: REQUIRED when the user asks to change or update something but does NOT specify the new value. Examples: "Can I change the return date?" → ["What date would you like to return?"]; "I want to change the destination" → ["Where would you like to go instead?"]; "change the departure" → ["What date would you like to depart?"]. If the user provides the new value in the same message (e.g. "change departure to March 10", "depart two days earlier"), use []. Use the conversation history to interpret relative references: "two days before" = 2 days before current departure; "same week" = infer from context.
 Return ONLY valid JSON, no markdown or explanation.
 
 Output schema (return exactly this structure; for multi_city include segments and stays arrays):
@@ -217,6 +237,9 @@ User message: {user_message}
 
 Current intent (merge with this; only overwrite fields the user message provides):
 {json.dumps(current_intent, indent=2, default=_json_serializable_default)}
+
+Conversation history (recent turns for context; use to interpret "two days before", "same as before", etc.):
+{_format_conversation_for_prompt(conversation_history)}
 
 Timezone: {timezone}
 Today (YYYY-MM-DD): {now_date}
@@ -426,6 +449,7 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
         trip_intent: Dict[str, Any],
         tool_queue: List[ToolCall],
         stack: Optional[List[Dict[str, Any]]] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Executes tool calls deterministically:
@@ -529,9 +553,11 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
             event_data: Dict[str, Any] = {"tool_name": tc.name, "result": result}
             if tc.name == "trip_requirements_extract" and tc.arguments:
                 event_data["user_message"] = tc.arguments.get("user_message", "")
+                event_data["conversation_history"] = conversation_history or []
             reduced = self.reducer.run({
                 "trip_intent": trip_intent,
                 "event": {"type": "TOOL_RESULT", "data": event_data},
+                "conversation_history": conversation_history or [],
             })
             stack.append(reduced)
             out_reduced = handler_output(reduced)
@@ -667,8 +693,16 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
         })
 
         # 1) Reduce the event
-        
-        reduced = self.reducer.run({"trip_intent": trip_intent, "event": {"type": event.type, "data": event.data}})
+        conversation_history: List[Dict[str, str]] = []
+        if self.AGU and hasattr(self.AGU, "get_message_history"):
+            hist = self.AGU.get_message_history()
+            if isinstance(hist, dict) and hist.get("success") and isinstance(hist.get("output"), list):
+                conversation_history = hist["output"][-20:]
+        reduced = self.reducer.run({
+            "trip_intent": trip_intent,
+            "event": {"type": event.type, "data": event.data},
+            "conversation_history": conversation_history,
+        })
         stack.append(reduced)
         out = handler_output(reduced)
         trip_intent = out["trip_intent"]
@@ -691,6 +725,7 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
             trip_intent=trip_intent,
             tool_queue=initial_calls,
             stack=stack,
+            conversation_history=conversation_history,
         )
 
         # 3) Optional: allow model to speak or request additional tools (default off; not used when AGU provides run_specialist)
@@ -723,6 +758,7 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
                     trip_intent=trip_intent,
                     tool_queue=model_calls,
                     stack=stack,
+                    conversation_history=conversation_history,
                 )
 
                 input_items.append({"role": "developer", "content": "TRIP_INTENT_JSON:\n" + json.dumps(trip_intent, default=_json_serializable_default)})

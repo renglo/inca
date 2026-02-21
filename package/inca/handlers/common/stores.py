@@ -43,7 +43,7 @@ class ToolDefinitionsStore(Protocol):
 class DataControllerTripStore(TripIntentStore):
     """
     TripIntent persistence via DataController (DAC): get_a_b_c / put_a_b_c.
-    Ring is 'noma_travels'. portfolio and org are fixed per store instance.
+    Ring is 'inca_intents'. portfolio and org are fixed per store instance.
     """
 
     RING = "inca_intents"
@@ -61,6 +61,27 @@ class DataControllerTripStore(TripIntentStore):
 
     def save(self, trip_id: str, doc: Dict[str, Any]) -> None:
         self._dac.put_a_b_c(self._portfolio, self._org, self.RING, trip_id, doc)
+
+
+class WorkspaceTripStore(TripIntentStore):
+    """
+    TripIntent persistence via AgentUtilities.mutate_workspace.
+    Stores the intent in the workspace document under key "intent".
+    Workspace is scoped by portfolio > org > entity_type > entity_id > thread.
+    """
+
+    def __init__(self, agu: Any) -> None:
+        self._agu = agu
+
+    def get(self, trip_id: str) -> Optional[Dict[str, Any]]:
+        workspace = self._agu.get_active_workspace()
+        if not workspace or not isinstance(workspace, dict):
+            return None
+        intent = workspace.get("intent")
+        return copy.deepcopy(intent) if isinstance(intent, dict) else None
+
+    def save(self, trip_id: str, doc: Dict[str, Any]) -> None:
+        self._agu.mutate_workspace({"intent": doc})
 
 
 # -----------------------------------------------------------------------------

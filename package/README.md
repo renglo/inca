@@ -92,9 +92,10 @@ This loop continues until there are no more tool calls, or safety limits are hit
 - Pure function (`Reducer.run(...)`) that:
   - Consumes `{ "trip_intent": ..., "event": ... }`.
   - Produces an updated `trip_intent`, optional `ui_messages`, and a **tool queue** (list of `ToolCall` dicts).
-- Two main event types:
+- Event types:
   - `USER_MESSAGE` — reacts to a new user message.
   - `TOOL_RESULT` / `TOOL_ERROR` — reacts to results/errors from tools.
+  - `INTENT_READY` — intent document is complete; skip extraction and proceed to quote/search (used by Sprinter).
 - Typical responsibilities:
   - Decide when to call tools like:
     - `trip_requirements_extract` (LLM extractor).

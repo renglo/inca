@@ -23,6 +23,7 @@ def main() -> int:
     from handlers.applier import Applier
     from handlers.reducer import Reducer
     from handlers.runner import Runner
+    from handlers.sprinter import Sprinter
     from handlers.tools import Tools
 
     ran = 0
@@ -33,6 +34,7 @@ def main() -> int:
         ("Reducer", Reducer.run_tests),
         ("Tools", Tools.run_tests),
         ("Runner", Runner.run_tests),
+        ("Sprinter", Sprinter.run_tests),
     ]:
         try:
             run_tests()

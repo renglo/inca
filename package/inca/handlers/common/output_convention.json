@@ -1,0 +1,56 @@
+{
+  "schema": "renglo.output_convention.v1",
+  "version": "1.0.0",
+  "description": "Maps tool output keys to working_memory paths. Implemented by the reducer/applier layer. A different execution layer would use a different convention.",
+  "conventions": {
+    "flight_quote_search": {
+      "options": { "wm_path": "flight_quotes" }
+    },
+    "hotel_quote_search": {
+      "options": { "wm_path": "hotel_quotes" },
+      "options_by_room": { "wm_path": "hotel_quotes_by_stay" }
+    },
+    "trip_option_ranker": {
+      "bundles": { "wm_path": "ranked_bundles" }
+    },
+    "policy_and_risk_check": {
+      "risk_report": { "wm_path": "risk_report" },
+      "_merge_into": {
+        "wm_path": "risk_report",
+        "merge_keys_from_selected": ["flight_option_id", "hotel_option_id", "flight_option_ids", "hotel_option_ids"]
+      }
+    },
+    "reservation_hold_create": {
+      "holds": { "wm_path": "holds" }
+    },
+    "booking_confirm_and_purchase": {
+      "confirmation": { "wm_path": "bookings", "append": true }
+    }
+  },
+  "status_updates": {
+    "flight_quote_search": {
+      "phase": "quote",
+      "state": "have_flight_quotes"
+    },
+    "hotel_quote_search": {
+      "phase": "quote",
+      "state": "have_hotel_quotes"
+    },
+    "trip_option_ranker": {
+      "phase": "quote",
+      "state": "presenting_options"
+    },
+    "policy_and_risk_check": {
+      "phase": "quote",
+      "state": "risk_checked"
+    },
+    "reservation_hold_create": {
+      "phase": "book",
+      "state": "holds_placed"
+    },
+    "booking_confirm_and_purchase": {
+      "phase": "book",
+      "state": "purchased"
+    }
+  }
+}

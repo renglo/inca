@@ -84,6 +84,7 @@ D) Events + tool calls
 	•	USER_APPROVED_PURCHASE — user authorizes purchase with approval_token and payment_method_id
 	•	TOOL_RESULT — tool completed
 	•	TOOL_ERROR — tool failed
+	•	INTENT_READY — intent document is complete; skip extraction and proceed to quote/search (used by Sprinter)
 
 2) ToolCall shape
 

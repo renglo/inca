@@ -1,0 +1,190 @@
+{
+  "schema": "renglo.tool_registry.v3",
+  "version": "1.0.0",
+  "description": "Generic tool definitions. Decoupled from intent document. Output keys follow convention: output_key maps to working_memory.output_key unless overridden by output_convention.",
+  "tools": [
+    {
+      "id": "trip_requirements_extract",
+      "handler_path": "trip_requirements_extract",
+      "description": "Extract structured trip requirements from a user message and identify missing required fields.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_message": { "type": "string" },
+          "context": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["user_message"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "trip_intent": { "type": "object" },
+          "missing_required_fields": { "type": "array", "items": { "type": "string" } },
+          "clarifying_questions": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "id": "flight_quote_search",
+      "handler_path": "noma/flight_quote_search",
+      "description": "Search for flight quote options. Returns canonical flight options.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "origin": { "type": "string" },
+          "destination": { "type": "string" },
+          "departure_date": { "type": "string" },
+          "segment_index": { "type": "integer" }
+        },
+        "required": ["origin", "destination", "departure_date"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "options": {
+            "type": "array",
+            "items": { "type": "object" }
+          }
+        }
+      }
+    },
+    {
+      "id": "hotel_quote_search",
+      "handler_path": "noma/hotel_quote_search",
+      "description": "Search for hotel quote options. Returns canonical hotel options.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "destination": { "type": "string" },
+          "dates": { "type": "object" },
+          "stay_index": { "type": "integer" }
+        },
+        "required": ["destination", "dates"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "options": { "type": "array", "items": { "type": "object" } },
+          "options_by_room": { "type": "array", "items": { "type": "array" } }
+        }
+      }
+    },
+    {
+      "id": "trip_option_ranker",
+      "handler_path": "noma/trip_option_ranker",
+      "description": "Combine flight and hotel options into ranked bundles with tradeoffs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "trip_intent": { "type": "object" },
+          "flight_options": { "type": "array" },
+          "hotel_options": { "type": "array" },
+          "flight_options_by_segment": { "type": "array" },
+          "hotel_options_by_stay": { "type": "array" },
+          "ranking_policy": { "type": "object" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "bundles": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    },
+    {
+      "id": "policy_and_risk_check",
+      "handler_path": "noma/policy_and_risk_check",
+      "description": "Evaluate selected options against org policy and common travel risks.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "trip_intent": { "type": "object" },
+          "selected_flight": { "type": "object" },
+          "selected_hotel": { "type": "object" },
+          "selected_flights": { "type": "array" },
+          "selected_hotels": { "type": "array" },
+          "org_policy": { "type": "object" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "risks": { "type": "array", "items": { "type": "string" } },
+          "blocking_issues": { "type": "array", "items": { "type": "string" } },
+          "required_user_confirmations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "id": "reservation_hold_create",
+      "handler_path": "noma/reservation_hold_create",
+      "description": "Create temporary holds for selected options (flight/hotel). Must be idempotent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "idempotency_key": { "type": "string" },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item_type": { "type": "string", "enum": ["flight", "hotel"] },
+                "option_id": { "type": "string" },
+                "traveler_profile_ids": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["item_type", "option_id"]
+            }
+          }
+        },
+        "required": ["idempotency_key", "items"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "holds": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    },
+    {
+      "id": "booking_confirm_and_purchase",
+      "handler_path": "noma/booking_confirm_and_purchase",
+      "description": "Finalize booking/purchase after explicit user approval. Must be idempotent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "idempotency_key": { "type": "string" },
+          "approval_token": { "type": "string" },
+          "hold_ids": { "type": "array", "items": { "type": "string" } },
+          "payment_method_id": { "type": "string" },
+          "contact_email": { "type": "string" }
+        },
+        "required": ["idempotency_key", "approval_token", "hold_ids", "payment_method_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "confirmation": { "type": "object" }
+        }
+      }
+    },
+    {
+      "id": "generate_followup_questions",
+      "handler_path": "generate_followup_questions",
+      "description": "Generate follow-up questions when required fields are missing.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "trip_intent": { "type": "object" },
+          "missing": { "type": "array", "items": { "type": "string" } },
+          "user_message": { "type": "string" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        }
+      }
+    }
+  ]
+}
