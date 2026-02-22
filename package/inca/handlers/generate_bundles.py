@@ -2044,15 +2044,11 @@ class GenerateBundles:
             if not intent:
                 return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}
 
-            self.AGU.mutate_workspace(
-                {'request_intent': intent},
-                public_user=public_user,
-                workspace_id=workspace_id
-            )
+            self.AGU.mutate_workspace({'intent': intent})
             print('Intent stored in workspace')
             
             
-            # Step 2: Generate Bundles
+            # Step 2: Generate Bundles based on intent
 
             from inca.handlers.sprinter import Sprinter
             sprinter_payload = {
@@ -2069,8 +2065,9 @@ class GenerateBundles:
             if not response_1.get('success'):
                 return {'success': False, 'output': results}
 
-            canonical = results[-1]['output']
-            return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': results}
+            canonical = response_1['output']['bundles']
+            print(f'Canonical output for generate_bundles:{canonical}')
+            return {'success': True, 'interface': 'bundles', 'input': payload, 'output': canonical, 'stack': results}
             
         except Exception as e:
             print(f'Error during execution: {str(e)}')

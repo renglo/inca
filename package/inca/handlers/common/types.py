@@ -90,7 +90,7 @@ class SprinterPayload(TypedDict):
     entity_type: str
     entity_id: str
     thread: str
-    trip_intent: Dict[str, Any]
+    trip_intent: NotRequired[Dict[str, Any]]
     connection_id: NotRequired[str]
 
 
@@ -98,6 +98,13 @@ class RunnerResult(TypedDict):
     ok: bool
     trip_id: str
     status: Dict[str, Any]
+
+
+class SprinterResult(TypedDict):
+    ok: bool
+    trip_id: str
+    bundles: List[Any]
+    error: NotRequired[str]
 
 
 class SpecialistToolPayload(TypedDict):
@@ -143,7 +150,7 @@ class RunnerHandlerReturn(TypedDict):
 class SprinterHandlerReturn(TypedDict):
     success: bool
     input: SprinterPayload
-    output: RunnerResult
+    output: SprinterResult
     stack: List[Dict[str, Any]]
 
 

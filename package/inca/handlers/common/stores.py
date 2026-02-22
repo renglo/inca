@@ -68,6 +68,9 @@ class WorkspaceTripStore(TripIntentStore):
     TripIntent persistence via AgentUtilities.mutate_workspace.
     Stores the intent in the workspace document under key "intent".
     Workspace is scoped by portfolio > org > entity_type > entity_id > thread.
+   
+    WorkspaceTripStore does not use trip_id in its implementation.
+    trip_id is kept because WorkspaceTripStore implements the TripIntentStore protocol.
     """
 
     def __init__(self, agu: Any) -> None:

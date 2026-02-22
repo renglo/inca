@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
-from .common.types import RunnerResult, SprinterHandlerReturn, SprinterPayload, ToolCall, handler_output
+from .common.types import SprinterHandlerReturn, SprinterPayload, SprinterResult, ToolCall, handler_output
 from .common.stores import WorkspaceTripStore
 from .runner import Runner, RunnerContext, runner_context
 
@@ -30,7 +30,7 @@ class Sprinter(Runner):
         """
         payload:
           portfolio, org, entity_type, entity_id, thread (required);
-          trip_intent (required) — the intent document from another handler;
+          trip_intent (optional) — if omitted, loads intent from workspace;
           connection_id (optional).
         """
         function = "run > sprinter"
@@ -38,42 +38,35 @@ class Sprinter(Runner):
         connection_id: Optional[str] = payload.get("connectionId") or payload.get("connection_id")
 
         if "portfolio" not in payload:
-            out_err: RunnerResult = {"ok": False, "trip_id": "", "status": {"error": "No portfolio provided"}}
+            out_err: SprinterResult = {"ok": False, "trip_id": "", "bundles": [], "error": "No portfolio provided"}
             return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
         portfolio = payload["portfolio"]
 
         if "org" not in payload:
-            out_err = {"ok": False, "trip_id": "", "status": {"error": "No org provided"}}
+            out_err = {"ok": False, "trip_id": "", "bundles": [], "error": "No org provided"}
             return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
         org = payload["org"]
 
         if "entity_type" not in payload:
-            out_err = {"ok": False, "trip_id": "", "status": {"error": "No entity_type provided"}}
+            out_err = {"ok": False, "trip_id": "", "bundles": [], "error": "No entity_type provided"}
             return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
         entity_type = payload["entity_type"]
 
         if "entity_id" not in payload:
-            out_err = {"ok": False, "trip_id": "", "status": {"error": "No entity_id provided"}}
+            out_err = {"ok": False, "trip_id": "", "bundles": [], "error": "No entity_id provided"}
             return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
         entity_id = payload["entity_id"]
 
         if "thread" not in payload:
-            out_err = {"ok": False, "trip_id": entity_id, "status": {"error": "No thread provided"}}
+            out_err = {"ok": False, "trip_id": entity_id, "bundles": [], "error": "No thread provided"}
             return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
         thread = payload["thread"]
-
-        if "trip_intent" not in payload:
-            out_err = {"ok": False, "trip_id": entity_id, "status": {"error": "No trip_intent provided"}}
-            return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
-        trip_intent = dict(payload["trip_intent"])
 
         if entity_type == "org-trip":
             parts = entity_id.split("-", 1)
             trip_id = parts[1].strip() if len(parts) > 1 else entity_id
         else:
             trip_id = entity_id
-
-        trip_intent["trip_id"] = trip_intent.get("trip_id") or trip_id
 
         self.AGU = AgentUtilities(
             self.config,
@@ -85,6 +78,16 @@ class Sprinter(Runner):
             connection_id=connection_id,
         )
         self.trip_store = WorkspaceTripStore(self.AGU)
+
+        if "trip_intent" in payload:
+            trip_intent = dict(payload["trip_intent"])
+        else:
+            trip_intent = self.trip_store.get(trip_id)
+        if not trip_intent or not isinstance(trip_intent, dict):
+            out_err = {"ok": False, "trip_id": trip_id, "bundles": [], "error": "No trip_intent in payload or workspace"}
+            return {"success": False, "input": dict(payload), "output": out_err, "stack": []}
+
+        trip_intent["trip_id"] = trip_intent.get("trip_id") or trip_id
 
         ctx = RunnerContext(
             portfolio=portfolio,
@@ -114,25 +117,38 @@ class Sprinter(Runner):
             if isinstance(hist, dict) and hist.get("success") and isinstance(hist.get("output"), list):
                 conversation_history = hist["output"][-20:]
 
+        # Call reducer
         reduced = self.reducer.run({
             "trip_intent": trip_intent,
             "event": {"type": "INTENT_READY", "data": {}},
             "conversation_history": conversation_history,
         })
+        
+        # reducer adds to the intent: 
+        # tool_calls – tools to run next
+        # ui_messages – text to show the user
+        
+        
         stack.append(reduced)
         out = handler_output(reduced)
         trip_intent = out["trip_intent"]
         self.trip_store.save(trip_id, trip_intent)
 
+
         ui_msgs = out.get("ui_messages") or []
         wm = trip_intent.get("working_memory") or {}
         ranked_bundles = wm.get("ranked_bundles") or []
-        if ui_msgs and ranked_bundles:
+        if ranked_bundles:
             self.AGU.save_chat(ranked_bundles, interface="bundle", msg_type="widget")
-            ui_msgs = [msg for msg in ui_msgs if not (isinstance(msg, str) and msg.strip().startswith("Here are the top options"))]
+            
         for msg in ui_msgs:
             m = {"role": "assistant", "content": f"{msg}"}
             self.AGU.save_chat(m)
+            
+        
+        # For each tool execute: 
+        # → Applier (wm += tool output, status update) 
+        # → Reducer(TOOL_RESULT) (followups, ui_messages)
 
         initial_calls = [ToolCall(**tc) for tc in (out.get("tool_calls") or [])]
         trip_intent = self._run_tool_queue_and_followups(
@@ -144,7 +160,8 @@ class Sprinter(Runner):
         )
 
         self.trip_store.save(trip_id, trip_intent)
-        output: RunnerResult = {"ok": True, "trip_id": trip_id, "status": trip_intent.get("status", {})}
+        bundles = (trip_intent.get("working_memory") or {}).get("ranked_bundles", [])
+        output: SprinterResult = {"ok": True, "trip_id": trip_id, "bundles": bundles}
         return {"success": True, "input": dict(payload), "output": output, "stack": stack}
 
     @classmethod
@@ -205,5 +222,5 @@ class Sprinter(Runner):
         assert out.get("success") is True
         assert "input" in out and "output" in out and "stack" in out
         o = out["output"]
-        assert o.get("ok") is True and o.get("trip_id") == "test-sprint-1" and "status" in o
+        assert o.get("ok") is True and o.get("trip_id") == "test-sprint-1" and "bundles" in o
         return True
