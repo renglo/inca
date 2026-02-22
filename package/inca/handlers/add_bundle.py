@@ -10,7 +10,7 @@ from renglo.common import load_config
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Dict, Any, Union, List
+from typing import Dict, Any, Union, List, Optional
 from decimal import Decimal
 from openai import OpenAI
 
@@ -868,7 +868,7 @@ class AddBundle:
                     }
 
                 # Extract cache from workspace
-                workspace = workspaces_list[0]
+                workspace = workspaces_list[-1]
                 if 'cache' not in workspace:
                     print('No cache found in workspace')
                     return {
@@ -878,7 +878,7 @@ class AddBundle:
                         'output': 0
                     }
 
-                cache_key = 'irn:tool_rs:noma/generate_bundles'
+                cache_key = 'irn:tool_rs:inca/generate_bundles'
                 if cache_key not in workspace['cache']:
                     print(f'Cache key {cache_key} not found')
                     return {
@@ -888,7 +888,7 @@ class AddBundle:
                         'output': 0
                     }
 
-                cache = workspace['cache'][cache_key]['output']['working_memory']['ranked_bundles']
+                cache = workspace['cache'][cache_key]['output']
 
                 print('Cache:',cache)
 
@@ -904,140 +904,138 @@ class AddBundle:
                         'output': 0
                     }
 
-                # Define the JSON schema separately to avoid f-string conflicts
+                # Define the JSON schema for bundle objects (matches generate_bundles output)
                 json_schema = '''{
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
                     "properties": {
-                        "airline_logo": {
-                            "type": "string",
-                            "format": "uri"
-                        },
-                        "carbon_emissions": {
+                        "bundle_id": { "type": "string" },
+                        "estimated_total": {
                             "type": "object",
                             "properties": {
-                                "difference_percent": { "type": "string" },
-                                "this_flight": { "type": "string" },
-                                "typical_for_this_route": { "type": "string" }
-                            },
-                            "required": ["difference_percent", "this_flight", "typical_for_this_route"]
-                        },
-                        "departure_token": {
-                            "type": "string"
-                        },
-                        "flights": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "airline": { "type": "string" },
-                                    "airline_logo": { "type": "string", "format": "uri" },
-                                    "airplane": { "type": "string" },
-                                    "arrival_airport": {
-                                        "type": "object",
-                                        "properties": {
-                                            "id": { "type": "string" },
-                                            "name": { "type": "string" },
-                                            "time": { "type": "string", "format": "date-time" }
-                                        },
-                                        "required": ["id", "name", "time"]
-                                    },
-                                    "departure_airport": {
-                                        "type": "object",
-                                        "properties": {
-                                            "id": { "type": "string" },
-                                            "name": { "type": "string" },
-                                            "time": { "type": "string", "format": "date-time" }
-                                        },
-                                        "required": ["id", "name", "time"]
-                                    },
-                                    "duration": { "type": "string" },
-                                    "extensions": {
-                                        "type": "array",
-                                        "items": { "type": "string" }
-                                    },
-                                    "flight_number": { "type": "string" },
-                                    "legroom": { "type": "string" },
-                                    "plane_and_crew_by": { "type": "string" },
-                                    "travel_class": { "type": "string" },
-                                    "often_delayed_by_over_30_min": { "type": "boolean" },
-                                    "overnight": { "type": "boolean" }
-                                },
-                                "required": [
-                                    "airline",
-                                    "airline_logo",
-                                    "airplane",
-                                    "arrival_airport",
-                                    "departure_airport",
-                                    "duration",
-                                    "extensions",
-                                    "flight_number",
-                                    "legroom",
-                                    "plane_and_crew_by",
-                                    "travel_class"
-                                ],
-                                "additionalProperties": false
+                                "amount": { "type": "string" },
+                                "currency": { "type": "string" }
                             }
                         },
-                        "layovers": {
+                        "flight_option_id": { "type": "string" },
+                        "flight_option_ids": {
                             "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "duration": { "type": "string" },
-                                    "id": { "type": "string" },
-                                    "name": { "type": "string" }
+                            "items": { "type": "string" }
+                        },
+                        "hotel_option_id": { "type": "string" },
+                        "hotel_option_ids": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "price_breakdown": {
+                            "type": "object",
+                            "properties": {
+                                "flight_price_per_ticket": {
+                                    "type": "object",
+                                    "properties": {
+                                        "amount": { "type": "string" },
+                                        "currency": { "type": "string" }
+                                    }
                                 },
-                                "required": ["duration", "id", "name"]
+                                "flight_segments": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "date": { "type": "string" },
+                                            "from": { "type": "string" },
+                                            "to": { "type": "string" },
+                                            "total": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "amount": { "type": "string" },
+                                                    "currency": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "flight_total": {
+                                    "type": "object",
+                                    "properties": {
+                                        "amount": { "type": "string" },
+                                        "currency": { "type": "string" }
+                                    }
+                                },
+                                "hotel_stays": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "check_in": { "type": "string" },
+                                            "check_out": { "type": "string" },
+                                            "guest_count": { "type": "string" },
+                                            "location_code": { "type": "string" },
+                                            "nights": { "type": "string" },
+                                            "price_per_night": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "amount": { "type": "string" },
+                                                    "currency": { "type": "string" }
+                                                }
+                                            },
+                                            "total": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "amount": { "type": "string" },
+                                                    "currency": { "type": "string" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "hotel_total": {
+                                    "type": "object",
+                                    "properties": {
+                                        "amount": { "type": "string" },
+                                        "currency": { "type": "string" }
+                                    }
+                                },
+                                "passenger_count": { "type": ["string", "integer"] },
+                                "total": {
+                                    "type": "object",
+                                    "properties": {
+                                        "amount": { "type": "string" },
+                                        "currency": { "type": "string" }
+                                    }
+                                }
                             }
                         },
-                        "price": {
-                            "type": "string"
+                        "tradeoffs": {
+                            "type": "array",
+                            "items": { "type": "string" }
                         },
-                        "total_duration": {
-                            "type": "string"
-                        },
-                        "type": {
-                            "type": "string"
-                        }
+                        "why_this_bundle": { "type": "string" }
                     },
-                    "required": [
-                        "airline_logo",
-                        "carbon_emissions",
-                        "departure_token",
-                        "flights",
-                        "layovers",
-                        "price",
-                        "total_duration",
-                        "type"
-                    ],
-                    "additionalProperties": false
+                    "additionalProperties": true
                 }'''
 
                 # Create prompt and call LLM
                 prompt_text = f"""
-                - You are a very smart assistant that helps user find a json object inside of a cache.
-                - The cache is an array that has as many objects as flights options.
-                - Given this hint: {hint}, you need to infer to what of the options the user is referring to.
+                - You are a very smart assistant that helps the user find a bundle object inside of a cache.
+                - The cache is an array of bundle objects (flight + hotel combinations).
+                - Given this hint: {hint}, you need to infer which bundle the user is referring to.
 
-                This is the cache (array):
+                This is the cache (array of bundles):
                 {serialized_cache}
 
-                ## Example 1: if the hint is similar to 'I want the first flight', the right option is the first item in the array.
-                ## Example 2: If the hint is similar to 'The flight that departs at 6:20' you need to look for the object in flights[].departure_airport.time
-                ## Example 3: If the hint is similar to 'The flight that arrives at 9:30' you need to look for the object in flights[].arrival_airport.time
-                ## Example 4: If the hint is similar to 'The flight with the least carbon emissions' you need to look for carbon_emissions.this_flight on each object in the array to make a decision.
-                ## Example 5: If the hint is similar to 'The cheapest flight' you need to look for the price in the price attribute in each object to make a decision.
-                ## Example 6: If the hint is similar to 'The shortest trip' you need to look for the duration in the total_duration attribute in each object to make a decision.
-                ## Example 7: If the hint is similar to 'The airline that is called Aeromexico' you need to look for the object in flights[].airline.
+                ## Example 1: If the hint is similar to 'I want the first one' or 'the first bundle', the right option is index 0.
+                ## Example 2: If the hint is similar to 'The cheapest' or 'lowest price', look at estimated_total.amount or price_breakdown.total.amount in each bundle.
+                ## Example 3: If the hint is similar to 'The one that goes to Seattle', look at price_breakdown.flight_segments[].to or price_breakdown.hotel_stays[].location_code.
+                ## Example 4: If the hint mentions a specific date, look at price_breakdown.flight_segments[].date or hotel_stays[].check_in/check_out.
+                ## Example 5: If the hint mentions a reason, match against the why_this_bundle text in each bundle.
+                ## Example 6: If the hint is similar to 'The one with 4 guests', look at price_breakdown.passenger_count or hotel_stays[].guest_count.
 
-                - Please notice that in certain results, you'll find that the flights array has more than one object. That's because the passenger needs to get into a second or third flight to eventually make it to their destination.
-
-                - The JSON Schema for each Flight object in the array is shown below:
+                - The JSON Schema for each Bundle object in the array is shown below:
 
                 {json_schema}
 
-                All you need to output is the index number in the array that indicates what object is the one that the hint refers to.
+                All you need to output is the index number in the array that indicates which bundle the hint refers to.
                 If there is no match, return the number 999.
 
                 Return a JSON object with the following structure:
@@ -1073,8 +1071,8 @@ class AddBundle:
                     selected_index = 0
 
                 # Sanitize the selected flight data to convert Decimal objects to regular numbers
-                selected_flight = self.sanitize(cache[selected_index])
-                return {'success':True,'action':action,'input': payload,'output':selected_flight}
+                selected_bundle = self.sanitize(cache[selected_index])
+                return {'success':True,'action':action,'input': payload,'output':selected_bundle}
 
             else:
                 return {
@@ -1096,12 +1094,156 @@ class AddBundle:
 
 
 
-    def append_bundle(self, segment: Dict[str, Any]) -> Dict[str, Any]:
+    def _price_to_str(self, val: Any) -> str:
+        """Convert price (dict, number, or string) to display string."""
+        if val is None:
+            return ''
+        if isinstance(val, (int, float)):
+            return f"${val:.2f}"
+        if isinstance(val, dict):
+            amt = val.get('amount') or val.get('value')
+            cur = val.get('currency') or 'USD'
+            return f"{cur} {amt}" if amt is not None else ''
+        return str(val)
+
+    def _get_workspace_and_working_memory(self) -> tuple[bool, str, Dict[str, Any]]:
         """
-        
-        TO BE IMPLEMENTED
-        You need to iterate through the bundle and add each one of its segments to the trip document
-        
+        Fetch workspace and extract working_memory from intent.
+        Returns (success, error_message, working_memory).
+        """
+        portfolio = self._get_context().portfolio
+        org = self._get_context().org
+        entity_type = self._get_context().entity_type
+        entity_id = self._get_context().entity_id
+        thread = self._get_context().thread
+
+        if entity_type != 'org-trip':
+            return False, f"Unsupported entity_type: {entity_type}", {}
+
+        response = self.CHC.list_workspaces(portfolio, org, entity_type, entity_id, thread)
+        items = response.get('items') or []
+        if not items:
+            return False, "No workspaces found for this thread", {}
+
+        workspace = items[-1]
+        intent = workspace.get('intent') or {}
+        wm = intent.get('working_memory') or {}
+        return True, "", wm
+
+    def _flatten_hotel_quotes(self, wm: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flatten hotel_quotes_by_stay into a single list of options (like reducer)."""
+        by_stay = wm.get('hotel_quotes_by_stay') or []
+        if by_stay:
+            flat: List[Dict[str, Any]] = []
+            for stay in by_stay:
+                if not stay:
+                    continue
+                if isinstance(stay, list):
+                    for room in stay:
+                        if isinstance(room, dict):
+                            flat.append(room)
+                        elif isinstance(room, list):
+                            flat.extend(r for r in room if isinstance(r, dict))
+                elif isinstance(stay, dict):
+                    flat.append(stay)
+            return flat
+        return wm.get('hotel_quotes') or []
+
+    def _resolve_flight_option(
+        self, option_id: str, wm: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Find flight option by option_id in flight_quotes or flight_quotes_by_segment."""
+        by_seg = wm.get('flight_quotes_by_segment') or []
+        flat = wm.get('flight_quotes') or []
+        if by_seg:
+            for opts in by_seg:
+                if isinstance(opts, list):
+                    for o in opts or []:
+                        if isinstance(o, dict) and o.get('option_id') == option_id:
+                            return o
+                elif isinstance(opts, dict) and opts.get('option_id') == option_id:
+                    return opts
+        for o in flat:
+            if isinstance(o, dict) and o.get('option_id') == option_id:
+                return o
+        return None
+
+    def _resolve_hotel_option(
+        self, option_id: str, wm: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Find hotel option by option_id in hotel_quotes or hotel_quotes_by_stay."""
+        flat = self._flatten_hotel_quotes(wm)
+        for o in flat:
+            if isinstance(o, dict) and o.get('option_id') == option_id:
+                return o
+        return None
+
+    def _flight_option_to_segment(self, opt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Convert a flight option to trip document flight segment format.
+        Option may already be in segment format (has 'flights' key) or have 'segments'.
+        """
+        if opt.get('flights') and isinstance(opt.get('flights'), list):
+            vr = self.validate_flight_segment(opt)
+            return vr['output'] if vr.get('success') else None
+        segs = opt.get('segments') or []
+        if segs and isinstance(segs[0], dict):
+            seg = segs[0]
+            from_code = seg.get('from') or ''
+            to_code = seg.get('to') or ''
+            depart = seg.get('depart_at') or ''
+            arrive = seg.get('arrive_at') or ''
+            airline = seg.get('airline') or ''
+            fn = seg.get('flight_number') or ''
+            synthetic = {
+                'airline_logo': opt.get('airline_logo') or '',
+                'carbon_emissions': opt.get('carbon_emissions') or {
+                    'difference_percent': '', 'this_flight': '', 'typical_for_this_route': ''
+                },
+                'departure_token': opt.get('departure_token') or '',
+                'flights': [{
+                    'airline': airline,
+                    'airline_logo': opt.get('airline_logo') or '',
+                    'airplane': opt.get('airplane') or '',
+                    'arrival_airport': {'id': to_code, 'name': to_code, 'time': arrive},
+                    'departure_airport': {'id': from_code, 'name': from_code, 'time': depart},
+                    'duration': opt.get('total_duration') or '',
+                    'extensions': opt.get('extensions') or [],
+                    'flight_number': fn,
+                    'legroom': opt.get('legroom') or '',
+                    'plane_and_crew_by': airline,
+                    'travel_class': opt.get('travel_class') or 'economy',
+                }],
+                'layovers': opt.get('layovers') or [],
+                'price': self._price_to_str(opt.get('price') or opt.get('total_price')),
+                'total_duration': opt.get('total_duration') or '',
+                'type': opt.get('type') or 'direct',
+            }
+            vr = self.validate_flight_segment(synthetic)
+            return vr['output'] if vr.get('success') else None
+        return None
+
+    def _hotel_option_to_trip_hotel(self, opt: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert hotel option to trip document hotel format."""
+        pb = opt.get('total_price') or {}
+        amount = pb.get('amount') if isinstance(pb, dict) else opt.get('price')
+        return {
+            'name': opt.get('hotel_name') or opt.get('name') or '',
+            'address': opt.get('address') or '',
+            'check_in': opt.get('check_in') or '',
+            'check_out': opt.get('check_out') or '',
+            'price_per_night': float(amount) if isinstance(amount, (int, float)) else 0,
+            'currency': (pb.get('currency') if isinstance(pb, dict) else None) or 'USD',
+            'rating': opt.get('star_rating') or opt.get('rating'),
+            'property_token': opt.get('property_token') or '',
+            'amenities': opt.get('amenities') or [],
+        }
+
+    def append_bundle(self, bundle: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resolve bundle references (flight_option_ids, hotel_option_ids) from
+        workspace intent working_memory, then add each resolved flight and hotel
+        to the trip document.
         """
         action = "append_bundle"
 
@@ -1109,109 +1251,115 @@ class AddBundle:
             portfolio = self._get_context().portfolio
             org = self._get_context().org
             ring = 'noma_travels'
-
             entity_type = self._get_context().entity_type
             entity_id = self._get_context().entity_id
-            leg = int(self._get_context().leg)
 
-            # The trip_id sent through the payload is ignored as it could be spoofed
-            # Instead we obtain the trip id from the entity_id.
             trip_id = None
             if entity_type == 'org-trip':
-                #'a066a651f062-f37acf92-e2da-45c2-bdd9-41afa66d81e2'
-                #'f37acf92-e2da-45c2-bdd9-41afa66d81e2'
                 parts = entity_id.split('-')
                 trip_id = '-'.join(parts[1:])
 
+            if not trip_id:
+                raise Exception('No id provided')
 
+            if not isinstance(bundle, dict) or not bundle:
+                raise Exception('Bundle must be a non-empty dictionary')
 
-            print('trip_id >>',trip_id)
+            ok, err, wm = self._get_workspace_and_working_memory()
+            if not ok:
+                return {
+                    'success': False,
+                    'action': action,
+                    'input': bundle,
+                    'output': err,
+                    'interface': 'bundles_added'
+                }
 
-            if trip_id:
+            flight_ids = bundle.get('flight_option_ids') or (
+                [bundle['flight_option_id']] if bundle.get('flight_option_id') else []
+            )
+            hotel_ids = bundle.get('hotel_option_ids') or (
+                [bundle['hotel_option_id']] if bundle.get('hotel_option_id') else []
+            )
 
-                #1. We get the trip document we are going to modify
-                response_1 = self.DAC.get_a_b_c(portfolio,org,ring,trip_id)
+            added_flights: List[Dict[str, Any]] = []
+            added_hotels: List[Dict[str, Any]] = []
+            missing: List[str] = []
 
+            for fid in flight_ids:
+                if not fid:
+                    continue
+                opt = self._resolve_flight_option(fid, wm)
+                if not opt:
+                    missing.append(f"flight:{fid}")
+                    continue
+                seg = self._flight_option_to_segment(opt)
+                if seg:
+                    added_flights.append(seg)
 
-                print(f'add_flight > Segment to be inserted:')
-                print(segment)
-                print(f'type: {type(segment).__name__}')
-                if not isinstance(segment, dict):
-                    raise Exception('Segment must be a dictionary')
+            for hid in hotel_ids:
+                if not hid:
+                    continue
+                opt = self._resolve_hotel_option(hid, wm)
+                if not opt:
+                    missing.append(f"hotel:{hid}")
+                    continue
+                added_hotels.append(self._hotel_option_to_trip_hotel(opt))
 
-                if segment:
-                    # We validate the segment.
-                    validation_result = self.validate_flight_segment(segment)
+            if missing:
+                return {
+                    'success': False,
+                    'action': action,
+                    'input': bundle,
+                    'output': f"Could not resolve options in working_memory: {', '.join(missing)}",
+                    'interface': 'bundles_added'
+                }
 
-                    #We modify the document by adding the flights.
-                    if validation_result["success"]:
+            trip_doc = self.DAC.get_a_b_c(portfolio, org, ring, trip_id)
+            if not isinstance(trip_doc, dict):
+                trip_doc = {}
 
-                        # Create a new list based on the old flights list
-                        new_list = response_1['flights'].copy()
+            existing_flights = list(trip_doc.get('flights') or [])
+            existing_hotels = list(trip_doc.get('hotels') or [])
 
-                        # Insert the validation result at the specified index position
-                        # If the index is beyond the current list length, extend the list
-                        if leg >= len(new_list):
-                            # Extend the list with empty dictionaries if needed
-                            new_list.extend([{}] * (leg - len(new_list) + 1))
+            new_flights = existing_flights + added_flights
+            new_hotels = existing_hotels + added_hotels
 
-                        # Insert the validation result at the specified position
-                        new_list[leg] = validation_result["output"]
+            input_obj = {'flights': new_flights, 'hotels': new_hotels}
+            response_2, _ = self.DAC.put_a_b_c(portfolio, org, ring, trip_id, input_obj)
 
-                        # Create input object with the complete updated flights list
-                        input_obj = {'flights': new_list}
+            if not response_2.get('success'):
+                return {
+                    'success': False,
+                    'action': action,
+                    'input': bundle,
+                    'output': input_obj,
+                    'interface': 'bundles_added'
+                }
 
-                        print(f'add_flight > Segment to be inserted > AFTER VALIDATION:')
-                        print(f'Inserted at position {leg}:')
-                        print(validation_result["output"])
-                        print(f'Complete new flights list:')
-                        print(new_list)
-                        print(f"TYPE:{type(input_obj).__name__}")
+            summary = {
+                'bundle_id': bundle.get('bundle_id'),
+                'flights_added': len(added_flights),
+                'hotels_added': len(added_hotels),
+                'estimated_total': bundle.get('estimated_total'),
+                'why_this_bundle': bundle.get('why_this_bundle'),
+            }
 
-
-
-                        #3. We update the document in the backend
-                        response_2, st = self.DAC.put_a_b_c(portfolio,org,ring,trip_id,input_obj)
-
-
-                        if not response_2['success']:
-                            return {
-                                'success': False,
-                                'action': action,
-                                'input': segment,
-                                'output': input_obj
-                            }
-                        else:
-                            #Success scenario.
-                            #Interface:reload asks for a reload as the trip doc has changed.
-                            return {
-                                'success': True,
-                                'action': action,
-                                'input': segment,
-                                'output': input_obj,
-                                'interface':'reload'
-                            }
-                    else:
-                        return{
-                            'success': False,
-                            'action': action,
-                            'input': segment,
-                            'output': validation_result["message"]
-                        }
-
-
-                raise Exception('Segment is empty')
-
-
-            raise Exception('No id provided')
-
+            return {
+                'success': True,
+                'action': action,
+                'input': bundle,
+                'output': summary,
+                'interface': 'bundles_added'
+            }
 
         except Exception as e:
             return {
                 'success': False,
                 'action': action,
-                'input': '',
-                'output': f"Error in replace_flight: {str(e)}"
+                'input': bundle if isinstance(bundle, dict) else {},
+                'output': f"Error in append_bundle: {str(e)}",
+                'interface': 'bundles_added'
             }
 
 
@@ -1264,12 +1412,15 @@ class AddBundle:
         canonical = results[-1]['output']
 
         if not response_2['success']:
+            return {'success': False, 'input': payload, 'output': canonical, 'stack': results}
 
-            return {'success': False, 'input':payload, 'output': canonical, 'stack': results}
-
-
-        # All went well, report back
-        return {'success': True, 'interface': 'add_flight', 'input': payload, 'output':canonical,'stack': results}
+        return {
+            'success': True,
+            'interface': response_2.get('interface', 'bundles_added'),
+            'input': payload,
+            'output': canonical,
+            'stack': results
+        }
 
     
 
