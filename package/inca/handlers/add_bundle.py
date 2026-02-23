@@ -1230,8 +1230,8 @@ class AddBundle:
         return {
             'name': opt.get('hotel_name') or opt.get('name') or '',
             'address': opt.get('address') or '',
-            'check_in': opt.get('check_in') or '',
-            'check_out': opt.get('check_out') or '',
+            'check_in': opt.get('check_in') or opt.get('check_in_date') or '',
+            'check_out': opt.get('check_out') or opt.get('check_out_date') or '',
             'price_per_night': float(amount) if isinstance(amount, (int, float)) else 0,
             'currency': (pb.get('currency') if isinstance(pb, dict) else None) or 'USD',
             'rating': opt.get('star_rating') or opt.get('rating'),
