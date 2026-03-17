@@ -136,6 +136,7 @@ class Patcher(Handler):
             clear_key("ranked_bundles", "Flight inputs changed → cleared ranked bundles.")
             clear_key("risk_report", "Flight inputs changed → cleared risk report.")
             clear_key("holds", "Flight inputs changed → cleared holds.")
+            clear_key("bookings", "Flight inputs changed → cleared bookings (intent no longer matches).")
             clear_selection("Selection cleared because flight-derived artifacts are stale.")
 
         # Hotel inputs changed -> clear hotel quotes and downstream (includes itinerary.lodging.stays)
@@ -145,6 +146,7 @@ class Patcher(Handler):
             clear_key("ranked_bundles", "Hotel inputs changed → cleared ranked bundles.")
             clear_key("risk_report", "Hotel inputs changed → cleared risk report.")
             clear_key("holds", "Hotel inputs changed → cleared holds.")
+            clear_key("bookings", "Hotel inputs changed → cleared bookings (intent no longer matches).")
             clear_selection("Selection cleared because hotel-derived artifacts are stale.")
 
         # Policy/constraint changes -> clear risk; possibly holds if budget/refund changed
@@ -203,6 +205,17 @@ class Patcher(Handler):
             suggestions.append("trip_option_ranker")
 
         return suggestions
+
+    def apply_invalidations_for_modification(
+        self, trip_intent_before: Dict[str, Any], trip_intent_after: Dict[str, Any]
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Compute changed paths between before/after intents and run invalidation on the after intent.
+        Use when the intent was modified outside the Patcher (e.g. by PES modify_plan).
+        Modifies trip_intent_after in place. Returns (cleared, reasons).
+        """
+        changed_paths = self._compute_changed_paths(trip_intent_before, trip_intent_after)
+        return self._invalidate_caches(trip_intent_after, changed_paths)
 
     @classmethod
     def run_tests(cls) -> bool:
