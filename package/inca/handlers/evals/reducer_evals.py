@@ -75,7 +75,7 @@ def run_confirmation_evals(use_llm: bool = False) -> Dict[str, Any]:
     use_llm=True: requires OpenAI client (skip if not available)
     """
     _ensure_path()
-    from ..reducer import Reducer
+    from ..reducer import Reducer, schd_routes_for_unit_tests
     from ..common.reducer_llm import NoOpReducerLLMClient, ReducerLLMClientFromOpenAI
 
     llm_client: Any = NoOpReducerLLMClient()
@@ -94,6 +94,7 @@ def run_confirmation_evals(use_llm: bool = False) -> Dict[str, Any]:
             return {"skipped": True, "reason": str(e), "use_llm": True}
 
     reducer = Reducer(llm_client=llm_client)
+    reducer.set_schd_tool_routes(schd_routes_for_unit_tests())
     trip_intent = _make_trip_intent_awaiting_confirmation()
     summary = reducer._format_trip_summary(trip_intent)
 
@@ -130,9 +131,10 @@ def run_full_reducer_evals() -> Dict[str, Any]:
     Uses programmatic client only (deterministic).
     """
     _ensure_path()
-    from ..reducer import Reducer
+    from ..reducer import Reducer, schd_routes_for_unit_tests
 
     reducer = Reducer()
+    reducer.set_schd_tool_routes(schd_routes_for_unit_tests())
     results = []
 
     # Eval 1: USER_MESSAGE returns trip_requirements_extract
@@ -191,6 +193,7 @@ def run_full_reducer_evals() -> Dict[str, Any]:
         def infer_clarifying_question(self, user_message, conv, trip_summary):
             return "What date would you like to return?"
     reducer_3b = Reducer(llm_client=_MockAsksClient())
+    reducer_3b.set_schd_tool_routes(schd_routes_for_unit_tests())
     trip_intent = _make_trip_intent_awaiting_confirmation()
     out = reducer_3b.run({
         "trip_intent": trip_intent,
@@ -212,6 +215,7 @@ def run_full_reducer_evals() -> Dict[str, Any]:
         def infer_clarifying_question(self, user_message, conv, trip_summary):
             return None
     reducer_3c = Reducer(llm_client=_MockNoQuestionClient())
+    reducer_3c.set_schd_tool_routes(schd_routes_for_unit_tests())
     trip_intent = _make_trip_intent_awaiting_confirmation()
     out = reducer_3c.run({
         "trip_intent": trip_intent,

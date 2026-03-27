@@ -17,7 +17,7 @@ from .common.defaults import default_developer_prompt, default_system_prompt, de
 from .common.openai_adapter import AgentUtilitiesOpenAIResponsesClient, extract_output_text, extract_tool_calls
 from .applier import Applier
 from .patcher import Patcher
-from .reducer import Reducer
+from .reducer import Reducer, schd_routes_for_unit_tests
 from .common.reducer_llm import ReducerLLMClientFromOpenAI
 
 from renglo.common import load_config
@@ -113,6 +113,40 @@ class Runner(Handler):
         for key, value in kwargs.items():
             setattr(ctx, key, value)
         self._set_context(ctx)
+
+    def _load_schd_tool_routes(self, portfolio: str, org: str) -> Dict[str, str]:
+        """
+        Build schd_tools.key -> handler route from the schd_tools ring (DAC).
+        Paginates until last_id is exhausted.
+        """
+        out: Dict[str, str] = {}
+        lastkey: Optional[str] = None
+        while True:
+            res = self.DAC.get_a_b(portfolio, org, "schd_tools", limit=1000, lastkey=lastkey)
+            if not res.get("success"):
+                print(
+                    f"[IncaRunner] schd_tools list failed: {res.get('message') or res.get('error', res)}"
+                )
+                break
+            for item in res.get("items") or []:
+                key = (item.get("key") or "").strip()
+                handler = (item.get("handler") or "").strip()
+                if key and handler:
+                    out[key] = handler
+            last_id = res.get("last_id")
+            if not last_id:
+                break
+            lastkey = last_id
+        return out
+
+    def _refresh_schd_tool_routes(self, portfolio: str, org: str) -> None:
+        routes = self._load_schd_tool_routes(portfolio, org)
+        self.reducer.set_schd_tool_routes(routes)
+        if not routes:
+            print(
+                "[IncaRunner] Warning: schd_tools returned no key→handler entries; "
+                "tools that use tool_key in tool_registry.json will fail until schd_tools is populated."
+            )
 
     # -------------------------------------------------------------------------
     # TripIntent initializer
@@ -541,7 +575,7 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
             out_applied = handler_output(applied)
             trip_intent = out_applied["trip_intent"]
             wm = trip_intent.setdefault("working_memory", {})
-            if tc.name == "noma/trip_option_ranker":
+            if len(tc.name.split('/')) > 1 and tc.name.split('/')[1] == 'trip_option_ranker':
                 bundles_from_result = result_for_applier.get("bundles", []) if isinstance(result_for_applier, dict) else []
                 wm["ranked_bundles"] = bundles_from_result
             status = trip_intent.setdefault("status", {})
@@ -654,9 +688,11 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
             user_text=user_text,
         )
         self._set_context(ctx)
-        
+
+        self._refresh_schd_tool_routes(portfolio, org)
+
         stack: List[Dict[str, Any]] = []
-        
+
         # Create thread/message document
         print('Creating document for this turn ...')
         created= self.AGU.new_chat_message_document(user_text)
@@ -788,6 +824,12 @@ Generate 1-3 short, natural, conversational questions to ask the user to fill in
         mock_shc = MagicMock()
         mock_shc.handler_call.return_value = extract_result
         runner.SHC = mock_shc
+
+        def _fake_refresh(_p: str, _o: str) -> None:
+            runner.reducer.set_schd_tool_routes(schd_routes_for_unit_tests())
+
+        runner._refresh_schd_tool_routes = _fake_refresh  # type: ignore[method-assign]
+
         payload: RunnerPayload = {
             "portfolio": "p1",
             "org": "o1",

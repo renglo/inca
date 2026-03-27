@@ -99,9 +99,9 @@ This loop continues until there are no more tool calls, or safety limits are hit
 - Typical responsibilities:
   - Decide when to call tools like:
     - `trip_requirements_extract` (LLM extractor).
-    - `noma/flight_quote_search`, `noma/hotel_quote_search`.
-    - `noma/trip_option_ranker`, `noma/policy_and_risk_check`.
-    - `noma/reservation_hold_create`, etc.
+    - `x/flight_quote_search`, `x/hotel_quote_search`.
+    - `x/trip_option_ranker`, `x/policy_and_risk_check`.
+    - `x/reservation_hold_create`, etc.
   - Advance `status.phase` and `status.state` (e.g. `intake → quote → hold → book`).
   - Generate human‑readable `ui_messages` for the chat interface.
 
@@ -127,13 +127,13 @@ This loop continues until there are no more tool calls, or safety limits are hit
   - `trip_requirements_extract`:
     - Merges extracted `trip_intent` into the existing `TripIntent` (itinerary/party/preferences/constraints).
     - Updates `status.missing_required` and `status.assumptions`.
-  - `noma/flight_quote_search`:
+  - `x/flight_quote_search`:
     - Writes options into `working_memory.flight_quotes` or `working_memory.flight_quotes_by_segment[idx]`.
-  - `noma/hotel_quote_search`:
+  - `x/hotel_quote_search`:
     - Writes options into `working_memory.hotel_quotes` or `working_memory.hotel_quotes_by_stay[idx]`.
-  - `noma/trip_option_ranker`:
+  - `x/trip_option_ranker`:
     - Writes ranked bundles into `working_memory.ranked_bundles`.
-  - `noma/reservation_hold_create`:
+  - `x/reservation_hold_create`:
     - Writes holds into `working_memory.holds` and advances `status.phase/state`.
 
 ### Stores
@@ -236,12 +236,12 @@ Starting from the ready‑to‑quote TripIntent above:
 
 1. **Reducer schedules quote tools**
    - Reads TripIntent and enqueues:
-     - `noma/flight_quote_search` for flights.
-     - `noma/hotel_quote_search` for hotels.
+     - `x/flight_quote_search` for flights.
+     - `x/hotel_quote_search` for hotels.
 
 2. **Runner executes tools via `SchdController`**
    - For each tool:
-     - Calls `self.SHC.handler_call("noma", "flight_quote_search", args)` (or hotel equivalent).
+     - Calls `self.SHC.handler_call("x", "flight_quote_search", args)` (or hotel equivalent).
      - Passes the canonical tool result into the Applier.
 
 3. **Applier writes quotes**
@@ -250,7 +250,7 @@ Starting from the ready‑to‑quote TripIntent above:
    - Patcher ensures `status.phase/state` move through `quote → ranking_bundles`.
 
 4. **Reducer calls bundle ranker**
-   - When both quote lists are present, reducer enqueues `noma/trip_option_ranker`.
+   - When both quote lists are present, reducer enqueues `x/trip_option_ranker`.
 
 5. **Applier stores bundles + Runner sends UI**
    - Applier writes bundles into `working_memory.ranked_bundles`.
@@ -269,7 +269,7 @@ Starting from the ready‑to‑quote TripIntent above:
      - `status.phase/state` → `hold/creating_holds`.
 
 2. **Reducer schedules hold tool**
-   - Enqueues `noma/reservation_hold_create` with items constructed from `working_memory.selected` and the quote lists.
+   - Enqueues `x/reservation_hold_create` with items constructed from `working_memory.selected` and the quote lists.
 
 3. **Runner executes hold tool and Applier updates TripIntent**
    - Tool result includes hold IDs and expiry times.
@@ -293,7 +293,7 @@ Starting from the ready‑to‑quote TripIntent above:
    - Sets `status.phase/state` back to a quoting state (e.g. `quote/quoting_hotels`).
 
 3. **Reducer re‑enqueues quote + rank tools**
-   - New `noma/hotel_quote_search` and `noma/trip_option_ranker` calls are scheduled using the updated intent.
+   - New `x/hotel_quote_search` and `x/trip_option_ranker` calls are scheduled using the updated intent.
    - This matches **Example 6 — Modification flow** in `EXAMPLES.md`.
 
 ### Example E — Multi‑city and multi‑modal trips

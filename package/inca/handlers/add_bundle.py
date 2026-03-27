@@ -66,7 +66,7 @@ class RequestContext:
     org : str
         Organization ID
     entity_type : str
-        Entity type (e.g., 'noma_travels')
+        Entity type (e.g., 'x_travels')
     entity_id : str
         Entity ID (e.g., trip_id in format 'org-trip-<trip_id>')
     thread : str
@@ -835,7 +835,6 @@ class AddBundle:
         try:
             portfolio = self._get_context().portfolio
             org = self._get_context().org
-            ring = 'noma_travels'
 
             entity_type = self._get_context().entity_type
             entity_id = self._get_context().entity_id
@@ -1250,7 +1249,7 @@ class AddBundle:
         try:
             portfolio = self._get_context().portfolio
             org = self._get_context().org
-            ring = 'noma_travels'
+            ring = 'x_travels'
             entity_type = self._get_context().entity_type
             entity_id = self._get_context().entity_id
 

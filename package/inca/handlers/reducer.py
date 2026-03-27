@@ -4,6 +4,11 @@ Reducer: uses JSON tool definitions from tool_registry.json.
 
 Tool definitions are decoupled from the intent document. Decision logic (when to
 call what) remains here; tool identity comes from the registry.
+
+Handler routes are not stored in the registry: each tool references a schd_tools
+document via tool_key (schd_tools.key). The Runner loads schd_tools and calls
+set_schd_tool_routes(key -> handler) before reducing. Legacy handler_path in
+JSON is still supported as a direct override.
 """
 from __future__ import annotations
 
@@ -18,6 +23,23 @@ from .common.reducer_llm import NoOpReducerLLMClient, ReducerLLMClient
 
 def _default_registry_path() -> str:
     return os.path.join(os.path.dirname(__file__), "common", "tool_registry.json")
+
+
+def schd_routes_for_unit_tests() -> Dict[str, str]:
+    """
+    key -> handler route strings matching typical schd_tools.handler values.
+    Use in tests when DAC / schd_tools is not available.
+    """
+    return {
+        "trip_requirements_extract": "trip_requirements_extract",
+        "flight_quote_search": "x/flight_quote_search",
+        "hotel_quote_search": "x/hotel_quote_search",
+        "trip_option_ranker": "x/trip_option_ranker",
+        "policy_and_risk_check": "x/policy_and_risk_check",
+        "reservation_hold_create": "x/reservation_hold_create",
+        "booking_confirm_and_purchase": "x/booking_confirm_and_purchase",
+        "generate_followup_questions": "generate_followup_questions",
+    }
 
 
 def _flatten_hotel_rooms(by_stay: List[Any]) -> List[List[Dict[str, Any]]]:
@@ -55,7 +77,10 @@ def _room_occupancies_from_travelers(trip_intent: Dict[str, Any]) -> List[int]:
 
 class Reducer(Handler):
     """
-    Reducer that loads tool handler paths from a JSON registry.
+    Reducer that loads tool metadata from a JSON registry.
+
+    Prefer tool_key (schd_tools.key) per tool; Runner supplies handler routes via
+    set_schd_tool_routes. Optional handler_path in JSON overrides (legacy).
 
     Custom registry path: Reducer(registry_path="/path/to/tool_registry.json")
     """
@@ -68,7 +93,9 @@ class Reducer(Handler):
         llm_client: Optional[ReducerLLMClient] = None,
     ) -> None:
         path = registry_path or _default_registry_path()
-        self._tool_registry: Dict[str, str] = {}
+        self._handler_path_by_id: Dict[str, str] = {}
+        self._tool_key_by_id: Dict[str, str] = {}
+        self._schd_key_to_handler: Dict[str, str] = {}
         self._load_registry(path)
         self._llm_client: ReducerLLMClient = llm_client or NoOpReducerLLMClient()
 
@@ -79,15 +106,40 @@ class Reducer(Handler):
             tools = data.get("tools", [])
             for t in tools:
                 tid = t.get("id")
-                hpath = t.get("handler_path")
-                if tid and hpath:
-                    self._tool_registry[tid] = hpath
+                if not tid:
+                    continue
+                hp = (t.get("handler_path") or "").strip()
+                tkey = (t.get("tool_key") or t.get("tool_name") or "").strip()
+                if hp:
+                    self._handler_path_by_id[tid] = hp
+                elif tkey:
+                    self._tool_key_by_id[tid] = tkey
+                else:
+                    raise RuntimeError(
+                        f"tool_registry tool {tid!r} must define handler_path, tool_key, or tool_name"
+                    )
         except (OSError, json.JSONDecodeError) as e:
             raise RuntimeError(f"Failed to load tool registry from {path}: {e}") from e
 
+    def set_schd_tool_routes(self, key_to_handler: Dict[str, str]) -> None:
+        """Replace the schd_tools key -> handler route map (e.g. from DAC schd_tools ring)."""
+        self._schd_key_to_handler = dict(key_to_handler)
+
     def _handler_path(self, tool_id: str) -> str:
-        """Resolve tool id to handler path. Falls back to tool_id if not in registry."""
-        return self._tool_registry.get(tool_id, tool_id)
+        """Resolve tool id to executable handler path (extension/handler or bare name)."""
+        if tool_id in self._handler_path_by_id:
+            return self._handler_path_by_id[tool_id]
+        if tool_id in self._tool_key_by_id:
+            k = self._tool_key_by_id[tool_id]
+            route = (self._schd_key_to_handler.get(k) or "").strip()
+            if route:
+                return route
+            raise RuntimeError(
+                f"Tool {tool_id!r} uses tool_key {k!r}, but that key is missing from the "
+                f"schd_tools route map. Load schd_tools and call set_schd_tool_routes(), "
+                f"or set handler_path for this tool in tool_registry.json."
+            )
+        return tool_id
 
     def _get_flight_segment_indices(self, trip_intent: Dict[str, Any]) -> List[int]:
         iti = trip_intent.get("itinerary", {}) or {}
@@ -690,6 +742,7 @@ class Reducer(Handler):
     def run_tests(cls) -> bool:
         """Run a minimal battery of tests for this handler. Returns True on success, raises on failure."""
         handler = cls()
+        handler.set_schd_tool_routes(schd_routes_for_unit_tests())
         trip_intent = {"working_memory": {}, "status": {}, "itinerary": {}, "party": {}}
         payload = {
             "trip_intent": trip_intent,

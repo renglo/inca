@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from .common.types import SprinterHandlerReturn, SprinterPayload, SprinterResult, ToolCall, handler_output
 from .common.stores import WorkspaceTripStore
 from .runner import Runner, RunnerContext, runner_context
+from .reducer import schd_routes_for_unit_tests
 
 from renglo.common import load_config
 from renglo.agent.agent_utilities import AgentUtilities
@@ -100,6 +101,8 @@ class Sprinter(Runner):
             user_text="",
         )
         self._set_context(ctx)
+
+        self._refresh_schd_tool_routes(portfolio, org)
 
         stack: List[Dict[str, Any]] = []
 
@@ -195,6 +198,11 @@ class Sprinter(Runner):
         mock_shc = MagicMock()
         mock_shc.handler_call = mock_handler_call
         sprinter.SHC = mock_shc
+
+        def _fake_refresh(_p: str, _o: str) -> None:
+            sprinter.reducer.set_schd_tool_routes(schd_routes_for_unit_tests())
+
+        sprinter._refresh_schd_tool_routes = _fake_refresh  # type: ignore[method-assign]
 
         trip_intent = {
             "trip_id": "test-sprint-1",

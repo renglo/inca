@@ -26,7 +26,7 @@ def _default_convention_path() -> str:
 
 
 def _tool_id_from_name(tool_name: str) -> str:
-    """Extract tool id from handler path (e.g. noma/flight_quote_search -> flight_quote_search)."""
+    """Extract tool id from handler path (e.g. x/flight_quote_search -> flight_quote_search)."""
     return tool_name.split("/", 1)[-1] if "/" in tool_name else tool_name
 
 
